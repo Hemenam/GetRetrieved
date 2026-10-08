@@ -37,6 +37,14 @@ def configuration(settings, reranker=None) -> dict:
         "structured_output": settings.api_structured_output if hosted else "ollama_json_schema",
         "max_completion_tokens": settings.api_max_completion_tokens if hosted else 4096,
         "candidate_limit": settings.candidate_limit,
+        "relevance_thresholds": {
+            "min_cosine": settings.retrieval_min_cosine,
+            "min_bm25": settings.retrieval_min_bm25,
+            "search_gate": "cosine OR bm25; positive score required",
+            "min_reranker_score": settings.reranker_min_score,
+            "applies_to": ["hybrid", "hybrid_rerank"],
+            "calibrated_confidence": False,
+        },
         "max_excerpts": settings.max_excerpts,
         "max_context_characters": settings.max_context_characters,
         "rerank_pool_limit": settings.rerank_pool_limit,
@@ -106,6 +114,16 @@ def corpus(passages):
             json.dumps(values, ensure_ascii=False).encode("utf-8")
         ).hexdigest()
         trace["source_passage_count"] = len(passages)
+
+
+def relevance_filter(before: int, after: int):
+    trace = _trace.get()
+    if trace is not None:
+        trace["relevance_filter"] = {
+            "candidates_before": before,
+            "candidates_after": after,
+            "rejected_count": before - after,
+        }
 
 
 def provider_usage(result: dict, model: str, kind: str):

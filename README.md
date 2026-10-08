@@ -1,8 +1,8 @@
 # HRLearnium course assistant
 
-An independent FastAPI service that answers student questions from authorized course documents. With an LLM configured, students can ask in their own words and choose **exact excerpts** or **exact excerpts plus a cited explanation**. Django connects over HTTP using the [connector](examples/django_connector.py).
+An independent FastAPI service that answers student questions from authorized course documents. With an LLM configured, students receive a **natural, cited answer by default**, with exact source excerpts available separately as evidence. An explicit source-text option returns quotations instead. Django connects over HTTP using the [connector](examples/django_connector.py).
 
-The project now supports API keys through an OpenAI-compatible Chat Completions adapter, as well as local Ollama. **An API key alone does not activate a model:** the backend, provider URL, model name and key must be configured together. The existing development `.env` remains in the earlier `literal` diagnostic mode until that configuration is supplied. No live hosted-model evaluation has been completed.
+The project supports API keys through an OpenAI-compatible Chat Completions adapter, as well as local Ollama. **An API key alone does not activate a model:** the backend, provider URL, model name and key must be configured together. Use the evaluation runner to check your configured model; infrastructure tests alone do not establish answer quality.
 
 The supplied source is a Persian **DOCX**, with 11 chapters, 242 nonempty body paragraphs and 44 stored passages. The importer accepts DOCX only. PDF import, OCR and page-number citations are not implemented.
 
@@ -12,10 +12,12 @@ Both options use the same LLM answerability check. `verbatim` describes the **ou
 
 | `response_mode` | Successful response |
 | --- | --- |
-| `verbatim` (default) | Original supporting passages, copied exactly, with source locations |
-| `explained` | The same original passages, followed by a labelled model explanation with citations |
+| `explained` (default) | A generated answer to the actual question, with citations; exact passages remain separately in `excerpts` |
+| `verbatim` | Original supporting passages, copied exactly, with source locations |
 
 Both options accept direct questions, paraphrases, colloquial Persian, and questions about relationships described in the course. A related topic is insufficient: the model must judge that the passages support the actual answer. Unsupported questions receive a fixed refusal; unresolved references can receive a clarification.
+
+Whole-message greetings, thanks, and help requests receive a short `conversation` response without retrieval, citations, or model calls. A greeting followed by a real question still goes through the evidence pipeline.
 
 Examples for `POST /v1/courses/captain-storm/query`:
 
@@ -33,14 +35,16 @@ Examples for `POST /v1/courses/captain-storm/query`:
 }
 ```
 
-The second option permits a clearer explanation of the source meaning. It does not permit extra facts, invented examples, personal opinions, internet research or new personalized advice. The model has no web-search tools in this application.
+Explained mode permits a clearer explanation of the source meaning, without dumping whole chunks into the answer. It does not permit extra facts, invented examples, personal opinions, internet research or new personalized advice. The model has no web-search tools in this application.
 
 ## How a question is answered
 
 ```mermaid
 flowchart TD
     A[Question and response mode] --> B[Verify JWT and course access]
-    B --> C[Load authorized current passages]
+    B --> S{Whole-message greeting or help?}
+    S -->|Yes| T[Short conversational reply]
+    S -->|No| C[Load authorized current passages]
     C --> D[Full document context or hybrid retrieval]
     D --> E[LLM checks support and selects passage IDs]
     E -->|Unsupported or ambiguous| F[Fixed refusal or clarification]
@@ -48,17 +52,17 @@ flowchart TD
     G -->|verbatim| H[Return exact excerpts and citations]
     G -->|explained| I[LLM drafts statements with excerpt IDs]
     I --> J[Validate citations and ask LLM to check support]
-    J -->|Supported| K[Recheck source and return excerpts plus explanation]
+    J -->|Supported| K[Return natural answer and separate source evidence]
     J -->|Unsupported| F
 ```
 
 1. **Authorize first.** The signed service JWT supplies the tenant, user, permitted courses and scopes. Content is filtered by tenant and course before retrieval or model calls. The request body cannot override identity.
 2. **Resolve conversation context.** A conversation ID must belong to the same user, tenant and course. Up to three previous answered questions help resolve follow-ups; they are not factual evidence. Omit the ID for a first question. Invented or expired IDs return 404. Conversations have a one-hour sliding expiry; refused questions do not enter history.
 3. **Apply narrow Python rules.** Prechecks reject some explicit requests to override the source restriction or invent personalized advice. These supplement the model; they are not a semantic classifier.
-4. **Provide evidence.** Full-context mode provides all authorized passages within a size limit. Hybrid mode searches by words and vector similarity, then provides a bounded shortlist.
+4. **Provide evidence.** Full-context mode provides all authorized passages within a size limit. Hybrid mode searches by words and vector similarity, rejects candidates below both configured search floors, then builds a bounded shortlist. Hybrid-rerank can also apply a model-specific minimum cross-encoder score.
 5. **Check answerability and select IDs.** The chat model receives the question, previous questions and candidates as data. It returns structured JSON containing `status`, `passage_ids` and `reason_code`. The prompt permits matching by meaning, requires all substantive parts of the question to be supported, and preserves distinctions between hypothetical examples and actual claims. The model does not author quotations or source locations.
 6. **Verify the source in Python.** Every selected ID must be a retrieved candidate, unique, authorized and from a current active revision. The backend reloads stored text, verifies its canonical source slice and source checksum, then sorts excerpts by source position.
-7. **Assemble the chosen response.** In `verbatim`, `answer` is exactly the excerpt texts joined by two newlines. In `explained`, a second chat call drafts up to eight statements, each citing selected excerpt IDs. Python rejects invented or duplicate references. A third call checks every statement against its own cited evidence, including conditions, numbers and hypothetical context. An unsupported explanation is withheld and the request receives a refusal. Invalid output or provider failure returns 503. Source availability is checked again after generation.
+7. **Assemble the chosen response.** In `verbatim`, `answer` is exactly the excerpt texts joined by two newlines. In `explained`, a second chat call drafts up to eight natural answer statements, each citing selected excerpt IDs. The answer contains those statements, not a source-quote prefix. Python rejects invented or duplicate references. A third call checks responsiveness to the question and support from each statement's cited evidence, including conditions, numbers and hypothetical context. An unsupported explanation is withheld and the request receives a refusal. Invalid output or provider failure returns 503. Source availability is checked again after generation; exact excerpts remain available separately.
 
 All three chat stages use `HR_API_MODEL` for the hosted adapter or `HR_SELECTOR_MODEL` for Ollama. The optional embedding model only produces search vectors; it does not write answers or decide answerability.
 
@@ -75,6 +79,8 @@ For an answerable request, full-context mode uses **one chat call for verbatim**
 For this 44-passage document, full context is a useful starting configuration: the LLM can inspect all passages without relying on a shortlist. It is bounded by `HR_MAX_CONTEXT_CHARACTERS` (48,000 by default, counting passage text and chapter titles). An oversized course returns 503 and requires a suitable retrieval configuration. This is a character limit, not a provider token limit; the chosen model must accommodate prompts, JSON metadata, evidence and output.
 
 Hybrid defaults to eight candidates and up to four selected excerpts. Keyword search normalizes Persian/Arabic letter variants, digits, diacritics and spacing, removes fixed stopwords and uses BM25. Vectors allow candidates without shared query words. Returned source text is never normalized. Search scores are rankings, not answerability confidence scores.
+
+The provisional hybrid floors are cosine similarity >= **0.30 OR BM25 >= 1.0**, with a positive score required. They are adjustable heuristics, not calibrated probabilities. Full-context mode has no retriever score and instead relies on the LLM answerability check. See [relevance gating and calibration](docs/relevance-gating.md).
 
 Hybrid retrieval can miss evidence outside the shortlist. Full-context inference can also make semantic mistakes. Both need evaluation with the actual model and course.
 
@@ -119,6 +125,32 @@ Then reindex the imported course before restarting:
 
 Hosted embedding identity includes the provider URL, model name and explicit revision. Changing any of these requires reindexing. Provider aliases can change without their names changing: increment `HR_API_EMBEDDING_REVISION` first, then reindex to save fresh vectors as a new document revision. Without an identity change, identical source uploads are deduplicated. Prefer pinned model identifiers where available.
 
+## Use the browser chat
+
+A lightweight, same-origin chat UI is now served by the Python app. No frontend build or Node.js
+installation is needed to use it. Start the existing server from this project folder:
+
+```powershell
+.\.venv\Scripts\python.exe -m hrlearnium serve --port 8000
+```
+
+Open [the local chat](http://127.0.0.1:8000/chat). Click **Connect a course**, enter
+`captain-storm`, and paste a short-lived **service JWT**, generated in another terminal:
+
+```powershell
+.\.venv\Scripts\python.exe -m hrlearnium token --tenant customer-demo --course captain-storm --scope query --ttl 300
+```
+
+Do not paste your model provider API key. That stays in the server's `.env`.
+Choose **Cited explanation** or **Source text**, then send a question. Click a citation to read
+the exact source, or enable **Test details** to inspect the existing evaluation diagnostics.
+Follow-ups automatically send the returned conversation ID. Refreshing a token for the same
+user/course keeps the conversation; **New chat** resets it. Reloading the page clears its token
+and transcript. Export saves the transcript and evidence as JSON, not the access token.
+
+See [the chat UI guide](docs/chat-ui.md) for testing, security boundaries and file locations.
+Set `HR_ENABLE_CHAT_UI=false` to disable the page in a deployment; API authentication is unchanged.
+
 ## Use localhost Swagger
 
 Restart after changing `.env` or code:
@@ -146,9 +178,9 @@ The source is already imported in this development database. For a fresh databas
 
 | Field | Meaning |
 | --- | --- |
-| `status` | `answered`, `refused` or `clarification` |
+| `status` | `answered`, `refused`, `clarification` or `conversation` |
 | `response_mode` | Echoes the selected option, including on refusals |
-| `answer` | Exact joined excerpts, plus the labelled explanation only in explained mode |
+| `answer` | Natural cited answer in explained mode; exact excerpts in verbatim mode; fixed text for nonanswered statuses |
 | `excerpts[]` | Exact original text, immutable passage IDs and source locations |
 | `explanation` | `null` in verbatim/nonanswered responses; otherwise an object with `statements[]` |
 | `statements[].text` | A generated explanation statement, at most 1,200 characters |
@@ -161,9 +193,9 @@ The source is already imported in this development database. For a fresh databas
 | `reason_code` | Such as `supported`, `insufficient_evidence`, `ambiguous` or `outside_scope` |
 | `retrieval_mode` | Actual `full_context`, `hybrid`, `hybrid_rerank` or diagnostic `lexical` path |
 | `conversation_id`, `request_id` | Conversation continuity and request tracing |
-| `policy_version` | `grounded-course-v2`, the application policy version |
+| `policy_version` | `grounded-course-v3`, the application policy version |
 
-In explained `answer`, the application appends `توضیح بر اساس متن دوره:` and numbered citations such as `[1]` to generated statements. Numbers refer to the one-based order of `excerpts`. A frontend can instead render the two fields separately, with clickable citations via `GET /v1/courses/{course_id}/excerpts/{id}`. Render all text escaped, preserve line breaks and avoid displaying both representations redundantly.
+In explained `answer`, the application adds numbered citations such as `[1]` to generated statements, separated by blank lines. Numbers refer to the one-based order of `excerpts`; whole quotations are not prepended. A frontend can render `explanation.statements` with clickable citations and open source evidence on demand. Render all text escaped and avoid displaying both answer representations redundantly. Version 3 changes the default mode and explained rendering contract; update existing consumers using the included connector.
 
 Your earlier chapter 4 passage covers paragraphs 92–98 and contains the whole 30-30-30 explanation. Quotations are whole stored passages, not model-authored sentence fragments.
 
@@ -171,7 +203,7 @@ Exactness is checked against extracted DOCX body text, not Word page layout. Hea
 
 ## Failure behavior and limits
 
-Refusals use a fixed Persian message saying no supported course answer was found and suggesting contact with instructors. Clarifications ask the student to identify the course topic. A refusal is a system judgment, not proof that no answer exists anywhere in the document.
+Refusals use a fixed Persian or English message saying no supported course answer was found, or that the question is outside the course, and invite a related question. Clarifications ask the student to identify the course topic. A refusal is a system judgment, not proof that no answer exists anywhere in the document.
 
 HTTP 401 means invalid/expired service authentication; 403 means missing permission; conversation-related 404 means an unavailable ID; 409 means content changed; 422 means invalid input; 429 means a request limit; and **503 means unavailable, misconfigured or invalid model/evidence processing**. Never display 503 as a content refusal.
 

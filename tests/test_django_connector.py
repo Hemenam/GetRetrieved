@@ -117,7 +117,10 @@ def test_query_sends_only_question_and_conversation_with_scoped_token():
         )
 
     result = client_for(handler).query(
-        **IDENTITY, question="پیام اضطراری چیست؟", conversation_id=conversation_id
+        **IDENTITY,
+        question="پیام اضطراری چیست؟",
+        conversation_id=conversation_id,
+        response_mode="verbatim",
     )
     assert result["answer"] == excerpt_text
 
@@ -133,7 +136,7 @@ def test_content_refusal_is_a_normal_success_response(status):
                 "excerpts": [],
             },
         )
-    ).query(**IDENTITY, question="یک پرسش")
+    ).query(**IDENTITY, question="یک پرسش", response_mode="verbatim")
     assert result["status"] == status
 
 
@@ -300,9 +303,7 @@ def explained_response():
             ]
         },
         "answer": (
-            "  واقعیت\nاقدام سازمان  \n\nگام بعدی کارکنان"
-            "\n\nتوضیح بر اساس متن دوره:\n"
-            "پیام شامل واقعیت و اقدام سازمان است. [1]\n"
+            "پیام شامل واقعیت و اقدام سازمان است. [1]\n\n"
             "گام بعدی کارکنان همراه با اقدام سازمان بیان می‌شود. [2] [1]"
         ),
     }
@@ -327,6 +328,18 @@ def test_explained_query_sends_mode_and_preserves_quotes_and_numbered_statement_
         [Excerpt.model_validate(item) for item in result["excerpts"]],
         Explanation.model_validate(result["explanation"]),
     )
+
+
+def test_connector_defaults_to_natural_explained_answer_without_quote_prefix():
+    payload = explained_response()
+
+    def handler(request):
+        assert json.loads(request.content)["response_mode"] == "explained"
+        return httpx.Response(200, json=payload)
+
+    result = client_for(handler).query(**IDENTITY, question="پیام اضطراری چیست؟")
+    assert result == payload
+    assert not result["answer"].startswith(result["excerpts"][0]["text"])
 
 
 @pytest.mark.parametrize("mode", [None, "summary", 1, ["explained"], True])
@@ -363,9 +376,9 @@ def test_response_mode_must_match_requested_mode(requested, returned):
         )
 
 
-@pytest.mark.parametrize("status", ["refused", "clarification"])
+@pytest.mark.parametrize("status", ["refused", "clarification", "conversation"])
 @pytest.mark.parametrize("mode", ["verbatim", "explained"])
-def test_refusals_and_clarifications_preserve_requested_mode_without_explanation(status, mode):
+def test_nonanswered_statuses_preserve_requested_mode_without_explanation(status, mode):
     response = {
         "status": status,
         "answer": "پیام ثابت دوره",
@@ -388,11 +401,11 @@ def test_verbatim_cannot_include_generated_explanation_even_when_quotes_are_pres
     response["response_mode"] = "verbatim"
     with pytest.raises(HRLearniumProtocolError, match="Verbatim"):
         client_for(lambda request: httpx.Response(200, json=response)).query(
-            **IDENTITY, question="یک پرسش"
+            **IDENTITY, question="یک پرسش", response_mode="verbatim"
         )
 
 
-@pytest.mark.parametrize("status", ["refused", "clarification"])
+@pytest.mark.parametrize("status", ["refused", "clarification", "conversation"])
 @pytest.mark.parametrize("unwanted", ["excerpts", "explanation"])
 def test_nonanswered_statuses_cannot_smuggle_quotes_or_generated_statements(status, unwanted):
     response = explained_response()
@@ -473,14 +486,14 @@ def test_explained_answers_require_strict_structured_explanation(explanation):
 
 
 @pytest.mark.parametrize(
-    "mutation", ["added_text", "altered_quote", "wrong_number", "missing_explanation"]
+    "mutation", ["added_text", "altered_answer", "wrong_number", "missing_explanation"]
 )
 def test_combined_answer_must_exactly_match_quotes_and_declared_explanation(mutation):
     response = explained_response()
     if mutation == "added_text":
         response["answer"] += "\nیک پیشنهاد جدید"
-    elif mutation == "altered_quote":
-        response["answer"] = response["answer"].replace("  واقعیت", "واقعیت", 1)
+    elif mutation == "altered_answer":
+        response["answer"] = response["answer"].replace("پیام شامل واقعیت", "پیام فاقد واقعیت", 1)
     elif mutation == "wrong_number":
         response["answer"] = response["answer"].replace("[2] [1]", "[1] [2]")
     else:

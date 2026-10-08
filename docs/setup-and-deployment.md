@@ -2,18 +2,19 @@
 
 > This guide covers local Ollama setup, diagnostic literal lookup, and deployment. For hosted model API keys and provider configuration, follow [the main README](../README.md). Run all commands from the project root.
 
-A standalone FastAPI backend for an LMS chatbot with two response modes: **verbatim course passages**, or the same passages followed by a **cited explanation**. Django can call it over an authenticated HTTP API; no website or Django installation is required to run this service. Configure a local Ollama backend or a compatible hosted model API for natural-language questions.
+A standalone FastAPI backend for an LMS chatbot with **natural cited answers by default**, exact source evidence available separately, and an optional verbatim source-text mode. Django can call it over an authenticated HTTP API, or use the built-in `/chat` testing page. Configure a local Ollama backend or a compatible hosted model API for natural-language questions.
 
 The supplied Persian course was inspected as source data: 11 chapters, 242 nonempty paragraphs, and 44 coherent passages. The original customer file and the local database are excluded from Git and Docker images.
 
 ## What is enforced
 
-- `response_mode="verbatim"` returns only stored excerpt text. The LLM selects passage IDs; the backend retrieves the exact text. This is the default response mode.
-- `response_mode="explained"` preserves those exact excerpts and appends a separately labeled explanation. Every generated statement cites included excerpt IDs, and a separate model call checks the explanation against that evidence before display.
+- `response_mode="explained"` is the default. The LLM writes a natural answer; every generated statement cites included excerpt IDs, and a separate model call checks responsiveness and support before display. Exact source excerpts remain separate evidence.
+- `response_mode="verbatim"` explicitly requests only stored excerpt text. The LLM selects passage IDs; the backend retrieves the exact text.
+- Whole-message greetings, thanks and help requests receive short conversational replies without retrieval or model calls. Hybrid retrieval has configurable minimum search scores; see [relevance gating](relevance-gating.md).
 - Each selected ID must be an authorized retrieved candidate from an active document revision. The backend checks the source span and checksum again before responding.
 - Questions, previous questions, and imported document text are untrusted data. They cannot change the source policy.
 - Tenant, course, user, and action permissions come from a signed, short-lived Django service token, not from browser-supplied identity fields.
-- Unsupported questions produce a fixed Persian refusal. Unresolvable follow-ups produce a fixed clarification. A model outage is HTTP **503**, not a misleading content refusal.
+- Unsupported questions produce a fixed Persian/English refusal. Unresolvable follow-ups produce a fixed clarification. A model outage is HTTP **503**, not a misleading content refusal.
 - Course methods may be quoted and, in explained mode, explained in the student's language using the selected evidence. New advice, new examples, personalized plans and outside factual additions remain outside scope.
 
 Exact quotation provenance is enforced in code. **Selecting the right passage, deciding whether to refuse, and grounding generated explanations still require evaluation.** An exact quote can be irrelevant or misleading when taken from a hypothetical example. The explanation verifier is another model call, not a guarantee of factual support. Do not interpret passing infrastructure tests as an instructor-approved quality result.
@@ -52,7 +53,7 @@ If you previously used literal mode, change `HR_MODEL_BACKEND=ollama` in `.env`.
 
 Open `http://127.0.0.1:8000/docs` for the OpenAPI explorer. In Ollama mode, `/health/ready` checks model inventory in addition to database access. The service does not automatically pull models. With a hosted backend, authorized course context and learner questions are sent to the configured provider; use [the hosted setup instructions](../README.md) to configure that connection.
 
-Hosted `/health/ready` reports configuration readiness with `provider_verified=false`. It does not make a live provider request or establish that the key, model, quota, or provider schema support works. Validate those with an authenticated test query after configuration; no live hosted-provider validation has been completed for this project yet.
+Hosted `/health/ready` reports configuration readiness with `provider_verified=false`. It does not make a live provider request or establish that the key, model, quota, or provider schema support works. Validate those with an authenticated test query after configuration.
 
 ### Offline literal lookup
 
@@ -92,13 +93,13 @@ Natural-language query with exact quotation output:
 {"question": "مدل ۳۰-۳۰-۳۰ چیست؟", "response_mode": "verbatim"}
 ```
 
-The same question with a cited explanation after the quotations:
+The same question with a natural cited answer and separate source evidence:
 
 ```json
 {"question": "مدل ۳۰-۳۰-۳۰ چیست؟", "response_mode": "explained"}
 ```
 
-Both requests require an LLM backend. Omitting `response_mode` defaults to `verbatim`. The mode can be selected independently on each request, including follow-ups.
+Both course-answer requests require an LLM backend. Omitting `response_mode` defaults to `explained`. The mode can be selected independently on each request, including follow-ups. Short supported greetings do not require model inference.
 
 Response fields:
 
@@ -107,13 +108,13 @@ request_id, status, answer, excerpts[], conversation_id,
 reason_code, retrieval_mode, response_mode, explanation, policy_version
 ```
 
-`status` is `answered`, `refused`, or `clarification`. For an answered `verbatim` response, `answer` equals `"\n\n".join(excerpt.text for excerpt in excerpts)` exactly and `explanation` is `null`. For an answered `explained` response, `answer` begins with those same exact quotes and appends the labeled explanation with numbered citations. `explanation.statements` contains each generated statement's `text` and `citation_ids`, which must resolve to included excerpt IDs. The returned `response_mode` matches the request. Refusals and clarifications contain neither excerpts nor explanations.
+`status` is `answered`, `refused`, `clarification`, or `conversation`. For an answered `verbatim` response, `answer` equals `"\n\n".join(excerpt.text for excerpt in excerpts)` exactly and `explanation` is `null`. For an answered `explained` response, `answer` contains only generated statements with numbered citations, separated by blank lines. `explanation.statements` contains each statement's `text` and `citation_ids`, which must resolve to included excerpt IDs. Exact source text remains in `excerpts`. The returned `response_mode` matches the request. Nonanswered statuses contain neither excerpts nor explanations.
 
 Each excerpt has its immutable ID, original text, and citation including document ID/version/title, chapter number/title, section type, paragraph range, source offsets, and source checksum. Citation labels are metadata, not additions to the course quotation. Keep explanation text visually separate from quotations; see the complete rendering contract in [Django integration](django-integration.md).
 
 The default refusal is:
 
-> در محتوای این دوره، پاسخ مشخصی برای این پرسش پیدا نکردم. من فقط بر اساس محتوای دوره پاسخ می‌دهم. برای راهنمایی بیشتر می‌توانید با مدرسین دوره در ارتباط باشید.
+> برای این پرسش، توضیح مرتبط و کافی در محتوای این دوره پیدا نکردم. لطفاً پرسشی مرتبط با محتوای دوره بپرسید.
 
 HTTP errors remain separate: `401` invalid token, `403` unauthorized scope/course, `404` missing or inaccessible resource, `409` revision/content conflict, `413` oversized input, `415` unsupported file type, `422` invalid input/document, `429` rate limit, `503` unavailable/invalid evidence service. Never render a 503 as “the course does not contain the answer.”
 
@@ -163,7 +164,7 @@ After models are configured, source ingested/reindexed, and the API running:
 .\.venv\Scripts\python.exe scripts/evaluate.py --mode api --response-mode explained --local-auth --tenant customer-demo --course captain-storm --output evals/results/api-explained.json
 ```
 
-The first command evaluates default verbatim answers; the second evaluates the explained response contract. `--local-auth` is for the local operator and mints fresh short-lived tokens using `.env`; it never prints them. For remote deployments, supply a permitted token through `HR_EVAL_TOKEN` instead. On a fast model, use `--delay-seconds 3` to stay within the default query rate limit, or set an appropriate limit on a separate evaluation instance. The runner distinguishes HTTP/model failures, unsupported answers, unnecessary refusals, quote coverage, mode matching, and citation integrity. Generated explanations still require human review against their cited excerpts; passing structure and link checks does not establish semantic correctness. Retrieval-only scores and mocked model tests do not establish real-model answerability accuracy.
+The runner explicitly defaults to verbatim for the existing quotation baseline; this differs from the API's new explained default. The second command evaluates the explained response contract. `--local-auth` is for the local operator and mints fresh short-lived tokens using `.env`; it never prints them. For remote deployments, supply a permitted token through `HR_EVAL_TOKEN` instead. On a fast model, use `--delay-seconds 3` to stay within the default query rate limit, or set an appropriate limit on a separate evaluation instance. The runner distinguishes HTTP/model failures, unsupported answers, unnecessary refusals, quote coverage, mode matching, and citation integrity. Generated explanations still require human review against their cited excerpts; passing structure and link checks does not establish semantic correctness. Retrieval-only scores and mocked model tests do not establish real-model answerability accuracy.
 
 The instructor should review the cases and wrong/correct example boundaries, add held-out learner questions, and agree to release criteria before learner rollout. Repeat full evaluations after model, prompt, retrieval, or course changes. Keep exactness violations and cross-tenant disclosure at zero; measure and review unsupported-answer and unnecessary-refusal rates separately.
 

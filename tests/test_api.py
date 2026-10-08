@@ -20,7 +20,7 @@ from fastapi.testclient import TestClient
 from hrlearnium.config import Settings
 from hrlearnium.main import create_app
 from hrlearnium.models import ModelUnavailable
-from hrlearnium.policy import CLARIFICATION, REFUSAL
+from hrlearnium.policy import CLARIFICATION, REFUSAL, non_answer_reply
 from hrlearnium.schemas import Selection
 
 SECRET = "test-secret-at-least-32-characters-long-with-additional-test-only-entropy"
@@ -147,7 +147,7 @@ def upload(client, *, headers=None, course=COURSE, paragraphs=None, data=None):
 
 
 def ask(client, *, headers=None, course=COURSE, question=QUESTION, conversation_id=None):
-    payload = {"question": question}
+    payload = {"question": question, "response_mode": "verbatim"}
     if conversation_id is not None:
         payload["conversation_id"] = conversation_id
     return client.post(
@@ -248,7 +248,7 @@ def test_answer_is_exact_source_with_verifiable_unicode_offsets_and_hash(api_fac
     result = response.json()
     assert result["status"] == "answered"
     assert result["retrieval_mode"] == "hybrid"
-    assert result["policy_version"] == "grounded-course-v2"
+    assert result["policy_version"] == "grounded-course-v3"
     assert result["request_id"] == response.headers["x-request-id"]
     assert result["answer"] == "\n\n".join(excerpt["text"] for excerpt in result["excerpts"])
     source = "\n".join(PARAGRAPHS)
@@ -378,7 +378,7 @@ def test_policy_override_and_new_advice_do_not_reach_model(api_factory):
         response = ask(client, question=question)
         assert response.status_code == 200
         assert response.json()["reason_code"] == reason
-        assert response.json()["answer"] == REFUSAL
+        assert response.json()["answer"] == non_answer_reply(question, "refused", reason)
     assert gateway.selections == []
 
 
@@ -583,7 +583,7 @@ def test_reranker_receives_larger_authorized_pool_before_llm_selection(api_facto
     response = client.post(
         f"{BASE}/query",
         headers=token(),
-        json={"question": QUESTION, "include_evaluation": True},
+        json={"question": QUESTION, "response_mode": "verbatim", "include_evaluation": True},
     )
     assert response.status_code == 200
     payload = response.json()
@@ -622,7 +622,9 @@ def test_full_context_remains_embedding_free_and_diagnostics_are_opt_in(api_fact
     upload(client)
     assert ask(client).json()["evaluation"] is None
     measured = client.post(
-        f"{BASE}/query", headers=token(), json={"question": QUESTION, "include_evaluation": True}
+        f"{BASE}/query",
+        headers=token(),
+        json={"question": QUESTION, "response_mode": "verbatim", "include_evaluation": True},
     ).json()
     assert "embedding" not in measured["evaluation"]["stages_ms"]
     assert len(measured["evaluation"]["selector_candidates"]) == 2

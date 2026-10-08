@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HRLearnium Course Assistant API",
-    "description": "Authenticated course Q&A with cited evidence. Natural questions can return verbatim excerpts or excerpts plus a grounded model explanation (response_mode). An LLM backend is required for natural-language answerability and explanations. Configured backend: literal. The literal backend is diagnostic only; configure a model backend for student Q&A.",
-    "version": "0.2.0"
+    "description": "Authenticated course Q&A with cited evidence. Natural questions can return a natural grounded explanation (default) or verbatim excerpts (response_mode). Social replies are labelled conversation and contain no course evidence. An LLM backend is required for natural-language answerability and explanations. Configured backend: openai_compatible. ",
+    "version": "0.3.0"
   },
   "paths": {
     "/health/live": {
@@ -641,8 +641,8 @@
               "explained"
             ],
             "title": "Response Mode",
-            "description": "Both modes accept natural questions. Verbatim returns exact source excerpts; explained also includes a model explanation grounded in those excerpts.",
-            "default": "verbatim"
+            "description": "Both modes accept natural questions. Verbatim returns exact source excerpts; explained (default) returns a natural cited answer; exact evidence remains in excerpts.",
+            "default": "explained"
           },
           "conversation_id": {
             "anyOf": [
@@ -673,7 +673,7 @@
         "examples": [
           {
             "question": "مدل ۳۰-۳۰-۳۰ چطور به اولویت‌بندی در بحران کمک می‌کند؟",
-            "response_mode": "verbatim"
+            "response_mode": "explained"
           }
         ]
       },
@@ -688,7 +688,8 @@
             "enum": [
               "answered",
               "refused",
-              "clarification"
+              "clarification",
+              "conversation"
             ],
             "title": "Status"
           },
@@ -728,7 +729,7 @@
               "explained"
             ],
             "title": "Response Mode",
-            "default": "verbatim"
+            "default": "explained"
           },
           "explanation": {
             "anyOf": [
@@ -743,7 +744,7 @@
           "policy_version": {
             "type": "string",
             "title": "Policy Version",
-            "default": "grounded-course-v2"
+            "default": "grounded-course-v3"
           },
           "evaluation": {
             "anyOf": [

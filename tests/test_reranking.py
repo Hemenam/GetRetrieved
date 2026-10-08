@@ -47,6 +47,21 @@ def test_ranking_promotes_relevant_evidence_preserves_passages_and_original_scor
     assert all(c.rerank_score is None for c in pool)
 
 
+def test_raw_score_floor_is_inclusive_and_not_a_probability():
+    ranker = Ranker([-2.0, -1.0, 5.0])
+    ranked = rerank("سوال", candidates(), ranker, limit=3, min_score=-1.0)
+    assert [candidate.passage.id for candidate in ranked] == ["3", "2"]
+    assert [candidate.rerank_score for candidate in ranked] == [5.0, -1.0]
+
+
+@pytest.mark.parametrize("floor", [float("nan"), float("inf"), True, "0.5"])
+def test_invalid_raw_reranker_floor_fails_before_model_call(floor):
+    ranker = Ranker([0.5, 0.5, 0.5])
+    with pytest.raises(ValueError, match="finite scalar"):
+        rerank("سوال", candidates(), ranker, limit=3, min_score=floor)
+    assert ranker.calls == []
+
+
 @pytest.mark.parametrize(
     "scores", [[1.0], [0.0, float("nan"), 1.0], [True, 1.0, 2.0], [[1.0], [2.0], [3.0]]]
 )

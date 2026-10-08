@@ -20,9 +20,20 @@ class Reranker(Protocol):
 
 
 def rerank(
-    question: str, candidates: list[Candidate], ranker: Reranker, *, limit: int
+    question: str,
+    candidates: list[Candidate],
+    ranker: Reranker,
+    *,
+    limit: int,
+    min_score: float | None = None,
 ) -> list[Candidate]:
     """Never add or rewrite evidence. Scores indicate relevance, not answerability."""
+    if min_score is not None and (
+        isinstance(min_score, bool)
+        or not isinstance(min_score, Real)
+        or not math.isfinite(min_score)
+    ):
+        raise ValueError("Reranker threshold must be a finite scalar")
     if not candidates:
         return []
     scores = ranker.score(question, candidates)
@@ -34,6 +45,7 @@ def rerank(
     ranked = [
         replace(candidate, rerank_score=float(score))
         for candidate, score in zip(candidates, scores, strict=True)
+        if min_score is None or score >= min_score
     ]
     return sorted(ranked, key=lambda item: (-item.rerank_score, -item.rank_score, item.passage.id))[
         :limit

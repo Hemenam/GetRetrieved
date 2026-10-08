@@ -122,7 +122,7 @@ def _validate_query_answer(result: dict[str, Any], response_mode: str) -> None:
     if result["status"] != "answered":
         if excerpts or explanation is not None:
             raise HRLearniumProtocolError(
-                "A refusal or clarification cannot contain evidence or an explanation"
+                "A nonanswered response cannot contain evidence or an explanation"
             )
         return
     if not 1 <= len(excerpts) <= 8 or any(
@@ -146,7 +146,7 @@ def _validate_query_answer(result: dict[str, Any], response_mode: str) -> None:
                 "Verbatim responses cannot contain generated explanations"
             )
     else:
-        expected_answer += _render_explanation(explanation, excerpt_ids)
+        expected_answer = _render_explanation(explanation, excerpt_ids)
     if result["answer"] != expected_answer:
         raise HRLearniumProtocolError(
             "The answer differs from its source excerpts and declared explanation"
@@ -188,7 +188,7 @@ def _render_explanation(explanation: Any, excerpt_ids: list[str]) -> str:
             )
         markers = " ".join(f"[{citation_numbers[identifier]}]" for identifier in citation_ids)
         rendered.append(f"{text} {markers}")
-    return "\n\nتوضیح بر اساس متن دوره:\n" + "\n".join(rendered)
+    return "\n\n".join(rendered)
 
 
 class HRLearniumClient:
@@ -290,9 +290,9 @@ class HRLearniumClient:
         course_id: str,
         question: str,
         conversation_id: str | UUID | None = None,
-        response_mode: Literal["verbatim", "explained"] = "verbatim",
+        response_mode: Literal["verbatim", "explained"] = "explained",
     ) -> dict[str, Any]:
-        """Return exact excerpts with an optional cited explanation or a fixed refusal."""
+        """Return a natural cited answer, social reply, clarification or fixed refusal."""
         if not isinstance(response_mode, str) or response_mode not in {"verbatim", "explained"}:
             raise ValueError("response_mode must be verbatim or explained")
         payload: dict[str, Any] = {
@@ -313,7 +313,7 @@ class HRLearniumClient:
         if (
             not isinstance(result, dict)
             or not isinstance(result.get("status"), str)
-            or result["status"] not in {"answered", "refused", "clarification"}
+            or result["status"] not in {"answered", "refused", "clarification", "conversation"}
         ):
             raise HRLearniumProtocolError("Invalid query response status")
         if not isinstance(result.get("answer"), str) or not isinstance(

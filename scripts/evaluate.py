@@ -30,8 +30,9 @@ from hrlearnium.eval_tools import (  # noqa: E402
     validate_annotations,
 )
 
-STATUSES = {"answered", "refused", "clarification"}
+STATUSES = {"answered", "refused", "clarification", "conversation"}
 CATEGORIES = {
+    "conversation",
     "direct",
     "paraphrase",
     "typo",
@@ -317,7 +318,7 @@ def auth_headers(args: argparse.Namespace):
 
 def response_contract_checks(result, requested_mode: str) -> dict:
     """Check rendering and links, never whether generated statements are true."""
-    from hrlearnium.policy import CLARIFICATION, REFUSAL
+    from hrlearnium.policy import conversational_reply, non_answer_reply
     from hrlearnium.schemas import render_answer
 
     answered = result.status == "answered"
@@ -348,6 +349,17 @@ def response_contract_checks(result, requested_mode: str) -> dict:
         if answered
         else None
     )
+    if result.status == "conversation":
+        allowed_controls = {
+            reply[1]
+            for question in ("سلام", "hi", "ممنون", "thanks", "کمک", "help")
+            if (reply := conversational_reply(question)) and reply[0] == result.reason_code
+        }
+    else:
+        allowed_controls = {
+            non_answer_reply(question, result.status, result.reason_code)
+            for question in ("سلام", "hello")
+        }
     return {
         "requested_response_mode": requested_mode,
         "actual_response_mode": result.response_mode,
@@ -363,9 +375,7 @@ def response_contract_checks(result, requested_mode: str) -> dict:
             else None
         ),
         "control_message_valid": (
-            result.answer == (CLARIFICATION if result.status == "clarification" else REFUSAL)
-            and not result.excerpts
-            and explanation is None
+            result.answer in allowed_controls and not result.excerpts and explanation is None
             if not answered
             else None
         ),
@@ -640,8 +650,15 @@ def api_summary(outcomes: list[dict]) -> dict:
             sum(item.get("actual_status") == "clarification" for item in positives),
             len(positives),
         ),
+        "unnecessary_conversation_rate_on_answerable_cases": fraction(
+            sum(item.get("actual_status") == "conversation" for item in positives),
+            len(positives),
+        ),
         "abstention_rate_on_answerable_cases": fraction(
-            sum(item.get("actual_status") in {"refused", "clarification"} for item in positives),
+            sum(
+                item.get("actual_status") in {"refused", "clarification", "conversation"}
+                for item in positives
+            ),
             len(positives),
         ),
         "exact_answer_assembly": fraction(

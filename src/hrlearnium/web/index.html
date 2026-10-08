@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>HRLearnium · Course chat</title>
+  <link rel="stylesheet" href="/chat/assets/styles.css">
+  <script type="module" src="/chat/assets/app.mjs"></script>
+</head>
+<body>
+  <a class="skip-link" href="#question">Skip to question</a>
+  <header class="app-header">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">h.</span><div><strong>HRLearnium</strong><span>Course chat · testing workspace</span></div></div>
+    <nav aria-label="Chat controls">
+      <button id="connection-button" class="connection-button" type="button"><span class="status-dot" aria-hidden="true"></span><span id="connection-label">Connect a course</span></button>
+      <button id="export-chat" class="quiet-button" type="button" disabled>Export chat</button>
+      <button id="new-chat" class="quiet-button" type="button">New chat</button>
+    </nav>
+  </header>
+
+  <main class="chat-shell">
+    <div class="session-strip"><span>Answers from your course, with the original evidence.</span><span id="token-status">Service token required</span></div>
+    <div class="conversation-area" id="conversation-area">
+    <section id="welcome" class="welcome" aria-labelledby="welcome-title">
+      <div class="welcome-symbol" aria-hidden="true">[ ]</div>
+      <h1 id="welcome-title">Ask the course.<br><span>See the evidence.</span></h1>
+      <p>Test a question, inspect its sources, then try a follow-up.<br>The assistant should tell you when the course does not explain a subject.</p>
+      <div class="suggestions" aria-label="Example questions for the Captain Storm course">
+        <button type="button" data-question="مدل ۳۰-۳۰-۳۰ چیست؟" dir="auto">مدل ۳۰-۳۰-۳۰ چیست؟<span aria-hidden="true">↗</span></button>
+        <button type="button" data-question="سه بخش پیام اضطراری کدام‌اند؟" dir="auto">سه بخش پیام اضطراری کدام‌اند؟<span aria-hidden="true">↗</span></button>
+        <button type="button" data-question="دوره دربارهٔ وعده‌های غیرواقعی در بحران چه می‌گوید؟" dir="auto">دوره دربارهٔ وعده‌های غیرواقعی در بحران چه می‌گوید؟<span aria-hidden="true">↗</span></button>
+      </div>
+      <p class="small-note">These examples are for <bdi>captain-storm</bdi>. You can connect any authorized course.</p>
+    </section>
+    <section id="messages" class="messages" aria-label="Conversation"></section>
+    <div id="activity" class="activity" role="status" aria-live="polite"></div>
+    </div>
+
+    <div class="composer-dock">
+      <form id="question-form" class="composer">
+        <div class="composer-options">
+          <fieldset class="mode-picker"><legend class="visually-hidden">Response mode</legend><label><input type="radio" name="response-mode" value="explained" checked><span>Cited explanation</span></label><label><input type="radio" name="response-mode" value="verbatim"><span>Source text</span></label></fieldset>
+          <label class="evaluation-toggle"><input id="include-evaluation" type="checkbox"> Test details</label>
+        </div>
+        <label class="visually-hidden" for="question">Your question</label>
+        <textarea id="question" rows="2" dir="auto" placeholder="Ask in Persian or English…" aria-describedby="composer-help question-count"></textarea>
+        <div class="composer-actions"><span id="question-count">0 / 2,000</span><div><button id="cancel-request" class="quiet-button" type="button" hidden>Stop waiting</button><button id="send-question" class="primary-button" type="submit">Send question <span aria-hidden="true">↑</span></button></div></div>
+      </form>
+      <p id="composer-help" class="composer-help">Enter to send · Shift + Enter for a new line. Follow-ups use the last three answered questions, not the full transcript.</p>
+    </div>
+  </main>
+
+  <dialog id="connection-dialog" aria-labelledby="connection-title">
+    <form id="connection-form" class="connection-form" novalidate>
+      <div class="dialog-heading"><div><h2 id="connection-title">Connect to your course</h2><p>Uses the model already configured on your Python server.</p></div><button id="close-connection" class="icon-button" type="button" aria-label="Close connection settings">×</button></div>
+      <label for="course-id">Course ID</label><input id="course-id" type="text" value="captain-storm" autocomplete="off" spellcheck="false" maxlength="100" required>
+      <label for="service-token">Service access token <span>JWT</span></label><input id="service-token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your short-lived service token" required>
+      <p class="field-help">Not your model API key. The token stays in this page’s memory and is cleared on reload. An unchanged user and course keep the conversation when you refresh a token.</p>
+      <details class="token-instructions"><summary>How do I get a token?</summary><p>In another terminal, from the project folder, run:</p><pre><code>.\.venv\Scripts\python.exe -m hrlearnium token --tenant customer-demo --course captain-storm --scope query --ttl 300</code></pre><p>Copy the printed token here. Change the tenant/course arguments for another course. Tokens expire after five minutes; generate a fresh one when needed.</p></details>
+      <p id="connection-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions"><button id="disconnect" class="quiet-button" type="button" hidden>Disconnect</button><button class="primary-button" type="submit">Use this connection</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="source-dialog" class="source-dialog" aria-labelledby="source-title">
+    <div class="source-heading"><div><p class="small-note">Original course evidence</p><h2 id="source-title">Source passage</h2></div><button id="close-source" class="icon-button" type="button" aria-label="Close source passage">×</button></div>
+    <div id="source-content" class="source-content"></div>
+    <p class="source-footer">Exact text returned by the backend. The model explanation is shown separately in the chat.</p>
+  </dialog>
+  <noscript>This chat needs JavaScript enabled. You can also test the API at /docs.</noscript>
+</body>
+</html>

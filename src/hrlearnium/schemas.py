@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 Identifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,99}$")]
 Scope = Literal["query", "content:read", "content:write"]
 ResponseMode = Literal["verbatim", "explained"]
-POLICY_VERSION = "grounded-course-v2"
+POLICY_VERSION = "grounded-course-v3"
 
 
 class StrictModel(BaseModel):
@@ -26,7 +26,7 @@ class QueryRequest(StrictModel):
             "examples": [
                 {
                     "question": "مدل ۳۰-۳۰-۳۰ چطور به اولویت‌بندی در بحران کمک می‌کند؟",
-                    "response_mode": "verbatim",
+                    "response_mode": "explained",
                 }
             ]
         }
@@ -35,9 +35,9 @@ class QueryRequest(StrictModel):
         str, StringConstraints(strip_whitespace=True, min_length=2, max_length=2000)
     ]
     response_mode: ResponseMode = Field(
-        default="verbatim",
+        default="explained",
         description="Both modes accept natural questions. Verbatim returns exact source excerpts; "
-        "explained also includes a model explanation grounded in those excerpts.",
+        "explained (default) returns a natural cited answer; exact evidence remains in excerpts.",
     )
     conversation_id: UUID | None = Field(
         default=None,
@@ -86,26 +86,25 @@ class ExplanationVerification(StrictModel):
 
 
 def render_answer(excerpts: list[Excerpt], explanation: Explanation | None = None) -> str:
-    answer = "\n\n".join(excerpt.text for excerpt in excerpts)
     if explanation is not None:
         indices = {excerpt.id: index for index, excerpt in enumerate(excerpts, start=1)}
         lines = [
             statement.text + " " + " ".join(f"[{indices[id_]}]" for id_ in statement.citation_ids)
             for statement in explanation.statements
         ]
-        answer += "\n\nتوضیح بر اساس متن دوره:\n" + "\n".join(lines)
-    return answer
+        return "\n\n".join(lines)
+    return "\n\n".join(excerpt.text for excerpt in excerpts)
 
 
 class QueryResponse(StrictModel):
     request_id: str
-    status: Literal["answered", "refused", "clarification"]
+    status: Literal["answered", "refused", "clarification", "conversation"]
     answer: str
     excerpts: list[Excerpt]
     conversation_id: str
     reason_code: str
     retrieval_mode: Literal["lexical", "hybrid", "hybrid_rerank", "full_context"]
-    response_mode: ResponseMode = "verbatim"
+    response_mode: ResponseMode = "explained"
     explanation: Explanation | None = None
     policy_version: str = POLICY_VERSION
     evaluation: dict | None = None

@@ -13,3 +13,7 @@ jobs:
       - run: pip install --no-deps -e .
       - run: ruff check src tests examples scripts
       - run: pytest -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node --test tests/chat_ui.test.mjs

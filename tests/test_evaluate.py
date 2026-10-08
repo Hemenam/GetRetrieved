@@ -353,3 +353,60 @@ def test_held_out_second_course_dataset_needs_no_first_course_fixture(mock_api, 
         == 0
     )
     assert json.loads(output.read_text(encoding="utf-8"))["outcomes"][0]["id"] == "second-course-1"
+
+
+def test_chat_behavior_dataset_is_separate_and_contains_conversation_cases():
+    root = Path(__file__).resolve().parents[1]
+    cases = runner.load_cases(root / "evals/chat_behavior.jsonl", None)
+    assert len(cases) == 7
+    assert len(runner.load_cases(root / "evals/course_qa.jsonl", None)) == 100
+    assert [case["expected_status"] for case in cases[:2]] == ["conversation", "conversation"]
+
+
+@pytest.mark.parametrize("question", ["سلام", "Hi, how are you?", "thanks", "کمک"])
+def test_conversation_controls_are_valid_but_not_answered_evidence(mock_api, question):
+    from hrlearnium.policy import conversational_reply
+
+    reason, answer = conversational_reply(question)
+    payload = response("explained") | {
+        "status": "conversation",
+        "answer": answer,
+        "excerpts": [],
+        "explanation": None,
+        "reason_code": reason,
+    }
+    mock_api(payload)
+    case = CASE | {
+        "category": "conversation",
+        "question": question,
+        "expected_status": "conversation",
+        "required_quotes": [],
+        "expected_chapters": [],
+    }
+    outcomes, _ = runner.api_evaluation([case], arguments("explained"))
+    assert outcomes[0]["control_message_valid"]
+    assert outcomes[0]["passed_automated_checks"]
+    assert runner.api_summary(outcomes)["status_confusion_matrix"]["conversation"] == {
+        "conversation": 1
+    }
+
+
+def test_conversation_instead_of_answer_is_an_abstention(mock_api):
+    from hrlearnium.policy import conversational_reply
+
+    reason, answer = conversational_reply("hi")
+    mock_api(
+        response("explained")
+        | {
+            "status": "conversation",
+            "answer": answer,
+            "reason_code": reason,
+            "excerpts": [],
+            "explanation": None,
+        }
+    )
+    outcomes, _ = runner.api_evaluation([CASE], arguments("explained"))
+    summary = runner.api_summary(outcomes)
+    assert not outcomes[0]["passed_automated_checks"]
+    assert summary["abstention_rate_on_answerable_cases"]["rate"] == 1
+    assert summary["unnecessary_conversation_rate_on_answerable_cases"]["rate"] == 1

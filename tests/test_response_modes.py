@@ -57,8 +57,8 @@ def test_natural_question_verbatim_and_explained_use_same_evidence_gate(api_fact
     assert [call[0] for call in gateway.selections] == [question, question]
     assert explained["excerpts"] == verbatim["excerpts"]
     assert explained["response_mode"] == "explained"
-    assert explained["answer"].startswith(verbatim["answer"])
-    assert "توضیح بر اساس متن دوره:" in explained["answer"]
+    assert not explained["answer"].startswith(verbatim["answer"])
+    assert explained["answer"].startswith(explained["explanation"]["statements"][0]["text"])
     assert explained["answer"].endswith("[1]")
     parsed = QueryResponse.model_validate(explained)
     assert parsed.answer == render_answer(parsed.excerpts, parsed.explanation)

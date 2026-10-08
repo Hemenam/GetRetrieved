@@ -5,9 +5,15 @@ from hrlearnium import evaluation
 from hrlearnium.config import Settings
 from hrlearnium.ingestion import IngestionError, parse_docx
 from hrlearnium.models import ModelGateway, ModelUnavailable
-from hrlearnium.policy import CLARIFICATION, REFUSAL, is_bare_followup, is_followup, policy_check
+from hrlearnium.policy import (
+    conversational_reply,
+    is_bare_followup,
+    is_followup,
+    non_answer_reply,
+    policy_check,
+)
 from hrlearnium.reranking import CrossEncoderReranker, Reranker, rerank
-from hrlearnium.retrieval import Candidate, retrieve
+from hrlearnium.retrieval import Candidate, filter_relevance, retrieve
 from hrlearnium.schemas import Principal, QueryRequest, QueryResponse, Selection, render_answer
 from hrlearnium.storage import Storage, StorageConflict
 
@@ -120,6 +126,28 @@ class CourseService:
         mode = (
             "lexical" if self.settings.model_backend == "literal" else self.settings.retrieval_mode
         )
+        social_reply = conversational_reply(request.question)
+        if social_reply is not None:
+            reason, answer = social_reply
+            # Social turns share the scoped conversation but never become evidence history.
+            self.storage.save_conversation(
+                tenant,
+                course,
+                principal.sub,
+                conversation_id,
+                previous,
+                self.settings.conversation_ttl_seconds,
+            )
+            return QueryResponse(
+                request_id=request_id,
+                status="conversation",
+                answer=answer,
+                excerpts=[],
+                conversation_id=conversation_id,
+                reason_code=reason,
+                retrieval_mode=mode,
+                response_mode=request.response_mode,
+            )
         if request.response_mode == "explained" and self.settings.model_backend == "literal":
             raise ModelUnavailable("Explanation requires a configured LLM backend")
         decision = policy_check(request.question)
@@ -172,17 +200,32 @@ class CourseService:
                                     search_question,
                                     passages,
                                     query_embedding=vector,
-                                    limit=(
-                                        self.settings.rerank_pool_limit
-                                        if mode == "hybrid_rerank"
-                                        else self.settings.candidate_limit
-                                    ),
+                                    # Apply floors BEFORE top-k; weak high-ranked matches must
+                                    # not hide eligible evidence further down the fused list.
+                                    limit=len(passages),
                                 )
                         except ValueError as error:
                             raise ModelUnavailable(
                                 "Invalid retrieval embeddings; reindex the course"
                             ) from error
                         evaluation.candidates("retrieved_candidates", candidates)
+                        if mode in {"hybrid", "hybrid_rerank"}:
+                            before_count = len(candidates)
+                            with evaluation.stage("relevance_filter"):
+                                candidates = filter_relevance(
+                                    candidates,
+                                    min_cosine=self.settings.retrieval_min_cosine,
+                                    min_bm25=self.settings.retrieval_min_bm25,
+                                )
+                            evaluation.relevance_filter(before_count, len(candidates))
+                        candidates = candidates[
+                            : (
+                                self.settings.rerank_pool_limit
+                                if mode == "hybrid_rerank"
+                                else self.settings.candidate_limit
+                            )
+                        ]
+                        evaluation.candidates("eligible_candidates", candidates)
                         if mode == "hybrid_rerank":
                             with evaluation.stage("reranking"):
                                 candidates = rerank(
@@ -190,6 +233,7 @@ class CourseService:
                                     candidates,
                                     self.reranker,
                                     limit=self.settings.candidate_limit,
+                                    min_score=self.settings.reranker_min_score,
                                 )
                         context_size, bounded = 0, []
                         for candidate in candidates:
@@ -274,7 +318,7 @@ class CourseService:
                 raise StorageConflict("Course content changed during the query; retry")
         answer = render_answer(excerpts, explanation)
         if decision.status != "answered":
-            answer = CLARIFICATION if decision.status == "clarification" else REFUSAL
+            answer = non_answer_reply(request.question, decision.status, decision.reason_code)
         # Rejected questions never become context for subsequent questions.
         questions = previous + [request.question] if decision.status == "answered" else previous
         self.storage.save_conversation(

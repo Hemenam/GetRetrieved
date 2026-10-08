@@ -1,14 +1,15 @@
 import logging
 import time
 from contextlib import asynccontextmanager
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.staticfiles import StaticFiles
 
 from hrlearnium.auth import require_scope
 from hrlearnium.config import Settings
@@ -79,10 +80,11 @@ def create_app(
 
     app = FastAPI(
         title="HRLearnium Course Assistant API",
-        version="0.2.0",
+        version="0.3.0",
         lifespan=lifespan,
         description="Authenticated course Q&A with cited evidence. Natural questions can return "
-        "verbatim excerpts or excerpts plus a grounded model explanation (response_mode). "
+        "a natural grounded explanation (default) or verbatim excerpts (response_mode). "
+        "Social replies are labelled conversation and contain no course evidence. "
         "An LLM backend is required for natural-language answerability and explanations. "
         f"Configured backend: {settings.model_backend}. "
         + (
@@ -107,6 +109,14 @@ def create_app(
         response.headers["X-Request-ID"] = request.state.request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cache-Control"] = "no-store"
+        if request.url.path == "/chat" or request.url.path.startswith("/chat/assets/"):
+            response.headers["Content-Security-Policy"] = (
+                "default-src 'none'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; img-src 'self'; font-src 'self'; "
+                "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+            )
+            response.headers["Referrer-Policy"] = "no-referrer"
+            response.headers["X-Frame-Options"] = "DENY"
         logger.info(
             "request_id=%s method=%s status=%s duration_ms=%d",
             request.state.request_id,
@@ -299,5 +309,20 @@ def create_app(
         if not excerpts:
             raise HTTPException(status_code=404, detail="Excerpt not found")
         return excerpts[0]
+
+    if settings.enable_chat_ui:
+        web_directory = Path(__file__).parent / "web"
+        app.mount(
+            "/chat/assets", StaticFiles(directory=web_directory / "assets"), name="chat-assets"
+        )
+
+        @app.get("/", include_in_schema=False)
+        def chat_redirect():
+            return RedirectResponse("/chat")
+
+        @app.get("/chat", include_in_schema=False)
+        def chat_page():
+            # Only the static shell is public. All course queries still require a service JWT.
+            return FileResponse(web_directory / "index.html", media_type="text/html")
 
     return app

@@ -42,11 +42,15 @@ class Settings(BaseSettings):
     reranker_max_tokens: int = Field(default=8192, ge=128, le=32768)
     rerank_pool_limit: int = Field(default=32, ge=2, le=100)
     enable_docs: bool = True
+    enable_chat_ui: bool = True
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
     max_course_passages: int = Field(default=2000, ge=10, le=10000)
     max_document_characters: int = Field(default=500_000, ge=1000, le=2_000_000)
     max_context_characters: int = Field(default=48_000, ge=2000, le=100_000)
     candidate_limit: int = Field(default=8, ge=2, le=20)
+    retrieval_min_cosine: float = Field(default=0.30, ge=0, le=1, allow_inf_nan=False)
+    retrieval_min_bm25: float = Field(default=1.0, ge=0, allow_inf_nan=False)
+    reranker_min_score: float | None = Field(default=None, allow_inf_nan=False)
     max_excerpts: int = Field(default=4, ge=1, le=8)
     conversation_ttl_seconds: int = Field(default=3600, ge=60, le=86400)
     requests_per_minute: int = Field(default=30, ge=1, le=600)

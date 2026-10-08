@@ -50,6 +50,34 @@ def _unit_vector(vector: list[float], dimensions: int | None = None) -> list[flo
     return [value / norm for value in scaled]
 
 
+def filter_relevance(
+    candidates: list[Candidate], *, min_cosine: float, min_bm25: float
+) -> list[Candidate]:
+    """Keep evidence meeting either independent search floor, preserving fused order.
+
+    RRF is an ordering score, never an absolute relevance/confidence measure. Lexical
+    rescue preserves exact-name matches when their embedding similarity is weak.
+    Both search floors are heuristic, model/corpus-dependent, and need calibration.
+    """
+    if (
+        not math.isfinite(min_cosine)
+        or not 0 <= min_cosine <= 1
+        or not math.isfinite(min_bm25)
+        or min_bm25 < 0
+    ):
+        raise ValueError("Invalid relevance thresholds")
+    return [
+        item
+        for item in candidates
+        if (
+            item.semantic_score is not None
+            and item.semantic_score > 0
+            and item.semantic_score >= min_cosine
+        )
+        or (item.lexical_score > 0 and item.lexical_score >= min_bm25)
+    ]
+
+
 def retrieve(
     question: str,
     passages: list[SearchPassage],

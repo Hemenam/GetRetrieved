@@ -81,7 +81,7 @@ def course_assistant(request, course_id):
             raise ValueError("Invalid question")
         if len(question) > 2_000:
             raise ValueError("Question is too long")
-        response_mode = payload.get("response_mode", "verbatim")
+        response_mode = payload.get("response_mode", "explained")
         if response_mode not in ("verbatim", "explained"):
             raise ValueError("Invalid response mode")
         conversation_id = payload.get("conversation_id")
@@ -147,21 +147,22 @@ logging authorization headers, complete questions, or source document text.
 
 | Mode | Answer behavior |
 | --- | --- |
-| `verbatim` (default) | Exact source excerpts only |
-| `explained` | Exact source excerpts followed by a separate, cited explanation |
+| `explained` (default) | Natural cited answer; exact source excerpts are separate evidence |
+| `verbatim` | Exact source excerpts only |
 
-Omitting the mode preserves the original exact-excerpt behavior. A conversation
+Omitting the mode requests a natural explained answer. A conversation
 does not lock its mode: pass the desired mode again on each follow-up. If this
 customer's deployment should offer only exact wording, have Django always pass
 `response_mode="verbatim"` instead of exposing a mode selector to the browser.
 
-Successful HTTP responses have one of three statuses:
+Successful HTTP responses have one of four statuses:
 
 | Status | UI behavior |
 | --- | --- |
-| `answered` | Display exact excerpts and citations, plus a separate explanation when requested |
-| `refused` | Display the fixed Persian course-boundary message |
-| `clarification` | Display the fixed Persian clarification prompt |
+| `answered` | Display the natural explanation with citations, or exact excerpts in verbatim mode |
+| `refused` | Display the fixed Persian/English course-boundary message |
+| `clarification` | Display the fixed Persian/English clarification prompt |
+| `conversation` | Display a short greeting, acknowledgement or help reply without an Answered badge or evidence |
 
 The response includes `request_id`, `status`, `answer`, `excerpts`,
 `conversation_id`, `reason_code`, `retrieval_mode`, `response_mode`, `explanation`,
@@ -175,14 +176,15 @@ any generated addition. For an answered `explained` request, `explanation` conta
 must identify one of the response's included excerpts. Statements are trimmed and nonempty,
 at most 1,200 characters each, with 1–8 distinct citations; there are 1–8 statements.
 
-The combined `answer` begins with the same exact quotes, followed by two
-newlines, `توضیح بر اساس متن دوره:`, a newline, and one statement per line.
-Statements end with numbered citation markers such as `[1] [2]`, using the
-one-based order of `excerpts`. The connector checks that the entire combined
-answer matches this structure, that the quotes are unchanged, and that every
-explanation citation resolves. A refusal or clarification has no excerpts and
-no explanation in either mode. A missing explanation in an answered `explained`
-response is a protocol error, not a silent change back to verbatim mode.
+In policy version 3, `answer` contains only the generated statements, separated
+by two newlines. Statements end with numbered citation markers such as `[1] [2]`,
+using the one-based order of `excerpts`. Exact quotes remain in `excerpts` and
+are not prepended to the answer. The connector checks canonical rendering and
+that every explanation citation resolves. A refusal, clarification or
+conversational reply has no excerpts or explanation in either mode. A missing
+explanation in an answered `explained` response is a protocol error, not a silent
+change back to verbatim mode. Update older consumers that expect quote-prefixed
+explained answers or only three statuses.
 
 Render the explanation separately from the quoted course text and label it as
 an explanation. It is generated text, not an exact quotation. Do not paraphrase,

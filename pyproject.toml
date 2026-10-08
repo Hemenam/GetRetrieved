@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hrlearnium-chatbot"
-version = "0.2.0"
+version = "0.3.0"
 description = "Course-scoped Persian Q&A with exact citations and optional grounded explanations"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,6 +28,9 @@ hrlearnium = "hrlearnium.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+hrlearnium = ["web/*.html", "web/assets/*.css", "web/assets/*.mjs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
