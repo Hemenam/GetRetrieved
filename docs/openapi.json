@@ -656,6 +656,12 @@
             ],
             "title": "Conversation Id",
             "description": "Omit this field for your first question. For a follow-up, copy the conversation_id returned by a successful request for this same user and course. Do not invent an ID."
+          },
+          "include_evaluation": {
+            "type": "boolean",
+            "title": "Include Evaluation",
+            "description": "Include timings, ranking and configuration for evaluation tools.",
+            "default": false
           }
         },
         "additionalProperties": false,
@@ -710,6 +716,7 @@
             "enum": [
               "lexical",
               "hybrid",
+              "hybrid_rerank",
               "full_context"
             ],
             "title": "Retrieval Mode"
@@ -737,6 +744,18 @@
             "type": "string",
             "title": "Policy Version",
             "default": "grounded-course-v2"
+          },
+          "evaluation": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evaluation"
           }
         },
         "additionalProperties": false,

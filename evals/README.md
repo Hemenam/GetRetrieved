@@ -1,5 +1,7 @@
 # Persian course evaluation set
 
+For instructor fact annotations, semantic grading, future courses, and controlled full-context / hybrid / hybrid-rerank comparisons, follow [the experiment guide](../docs/retrieval-experiments.md). The original proposed cases remain available as a development baseline.
+
 `course_qa.jsonl` contains **100 proposed instructor-review cases** for the course assistant. Both response modes accept natural-language questions, paraphrases, and the Persian variants already included here. These cases have not been approved by the customer or instructor. They are a reproducible development evaluation, not evidence that the service is ready for unsupervised release. Keep them separate from the retrieval corpus.
 
 The reference is the supplied Persian, 11-chapter crisis-management DOCX, `4361832582818373377_8046908015302784 (1).docx`. Its SHA-256 is `76db099b613354a9c931d693ddaea52c656d4ec6dc18542d18f394fea6730ce2`. The 102 required quote anchors were checked against the original `word/document.xml` paragraph text; all eleven chapters are represented. The dataset contains selected short evidence passages, not the full document. No instructions or exercises inside the document were executed.

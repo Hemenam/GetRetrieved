@@ -202,6 +202,8 @@ def test_full_context_readiness_only_requires_chat_and_never_probes_provider(set
     settings.retrieval_mode = "hybrid"
     assert model.readiness()["ready"] is False
     assert model.readiness()["missing_settings"] == ["HR_API_EMBEDDING_MODEL"]
+    settings.retrieval_mode = "hybrid_rerank"
+    assert model.readiness()["missing_settings"] == ["HR_API_EMBEDDING_MODEL"]
 
 
 def test_embedding_identity_changes_for_provider_or_model_but_never_contains_key(settings):

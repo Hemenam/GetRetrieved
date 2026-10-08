@@ -70,6 +70,7 @@ For an answerable request, full-context mode uses **one chat call for verbatim**
 | --- | --- | --- |
 | `full_context` | All current authorized passages go to the LLM, which evaluates literal and semantic support directly | Chat model only; existing imported passages need no reindex |
 | `hybrid` | BM25 keyword ranking and embedding cosine similarity are combined with reciprocal-rank fusion; the top candidates go to the LLM | Chat and embedding models; passages indexed with the configured embedding identity |
+| `hybrid_rerank` | Hybrid retrieval builds a larger pool; a local cross-encoder ranks query/passage pairs before the existing LLM evidence selector | Hybrid prerequisites plus the optional reranker runtime and model files |
 
 For this 44-passage document, full context is a useful starting configuration: the LLM can inspect all passages without relying on a shortlist. It is bounded by `HR_MAX_CONTEXT_CHARACTERS` (48,000 by default, counting passage text and chapter titles). An oversized course returns 503 and requires a suitable retrieval configuration. This is a character limit, not a provider token limit; the chosen model must accommodate prompts, JSON metadata, evidence and output.
 
@@ -158,7 +159,7 @@ The source is already imported in this development database. For a fresh databas
 | `citation.source_start`, `source_end` | Zero-based character offsets in canonical source; end is exclusive |
 | `citation.source_sha256` | SHA-256 of the complete extracted source, distinct from the original file hash |
 | `reason_code` | Such as `supported`, `insufficient_evidence`, `ambiguous` or `outside_scope` |
-| `retrieval_mode` | Actual `full_context`, `hybrid` or diagnostic `lexical` path |
+| `retrieval_mode` | Actual `full_context`, `hybrid`, `hybrid_rerank` or diagnostic `lexical` path |
 | `conversation_id`, `request_id` | Conversation continuity and request tracing |
 | `policy_version` | `grounded-course-v2`, the application policy version |
 

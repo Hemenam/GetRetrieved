@@ -118,7 +118,7 @@ def api_factory(tmp_path):
     with ExitStack() as stack:
         counter = 0
 
-        def make(**overrides):
+        def make(reranker=None, **overrides):
             nonlocal counter
             counter += 1
             settings = Settings(
@@ -129,7 +129,7 @@ def api_factory(tmp_path):
                 **overrides,
             )
             gateway = FakeGateway()
-            app = create_app(settings, gateway)
+            app = create_app(settings, gateway, reranker)
             client = stack.enter_context(TestClient(app))
             return client, app, gateway
 
@@ -551,3 +551,79 @@ def test_full_context_baseline_returns_exact_excerpts(api_factory):
     result = response.json()
     assert result["retrieval_mode"] == "full_context"
     assert result["answer"] == "\n\n".join(item["text"] for item in result["excerpts"])
+
+
+def test_reranker_receives_larger_authorized_pool_before_llm_selection(api_factory):
+    class FakeReranker:
+        def __init__(self):
+            self.calls = []
+
+        def identity(self):
+            return {"model": "test-reranker"}
+
+        def score(self, question, candidates):
+            self.calls.append((question, candidates))
+            return [10.0 if c.passage.chapter_number == 3 else 0.0 for c in candidates]
+
+    ranker = FakeReranker()
+    client, app, gateway = api_factory(
+        reranker=ranker, retrieval_mode="hybrid_rerank", candidate_limit=2, rerank_pool_limit=4
+    )
+    paragraphs = [
+        "دوره",
+        "فصل اول: موضوع",
+        "محتوای اول",
+        "فصل دوم: موضوع",
+        "محتوای دوم",
+        "فصل سوم: موضوع",
+        "محتوای سوم",
+    ]
+    upload(client, paragraphs=paragraphs)
+    upload(client, headers=token(tenant="other-tenant"), paragraphs=paragraphs)
+    response = client.post(
+        f"{BASE}/query",
+        headers=token(),
+        json={"question": QUESTION, "include_evaluation": True},
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["retrieval_mode"] == "hybrid_rerank"
+    assert payload["excerpts"][0]["citation"]["chapter_number"] == 3
+    assert len(ranker.calls[0][1]) == 3
+    assert len(gateway.selections[0][2]) == 2
+    own, _ = app.state.storage.search_passages("tenant-1", COURSE)
+    assert {c.passage.id for c in ranker.calls[0][1]} == {p.id for p in own}
+    trace = payload["evaluation"]
+    assert trace["source_passage_count"] == 3
+    assert len(trace["retrieved_candidates"]) == 3
+    assert len(trace["selector_candidates"]) == 2
+    assert trace["selector_candidates"][0]["rerank_score"] == 10.0
+    assert {"embedding", "retrieval", "reranking", "selection"} <= trace["stages_ms"].keys()
+    assert "jwt_secret" not in trace["configuration"]
+
+
+def test_reranker_failure_never_falls_back_to_unranked_selection(api_factory):
+    class BrokenReranker:
+        def identity(self):
+            return {"model": "broken"}
+
+        def score(self, question, candidates):
+            raise ModelUnavailable("inference failure")
+
+    client, _, gateway = api_factory(retrieval_mode="hybrid_rerank", reranker=BrokenReranker())
+    upload(client)
+    assert ask(client).status_code == 503
+    assert gateway.selections == []
+
+
+def test_full_context_remains_embedding_free_and_diagnostics_are_opt_in(api_factory):
+    client, app, gateway = api_factory(retrieval_mode="full_context")
+    gateway.fail_embed = True
+    upload(client)
+    assert ask(client).json()["evaluation"] is None
+    measured = client.post(
+        f"{BASE}/query", headers=token(), json={"question": QUESTION, "include_evaluation": True}
+    ).json()
+    assert "embedding" not in measured["evaluation"]["stages_ms"]
+    assert len(measured["evaluation"]["selector_candidates"]) == 2
+    assert app.state.service.reranker is None

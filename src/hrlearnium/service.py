@@ -1,10 +1,12 @@
 import threading
 from uuid import uuid4
 
+from hrlearnium import evaluation
 from hrlearnium.config import Settings
 from hrlearnium.ingestion import IngestionError, parse_docx
 from hrlearnium.models import ModelGateway, ModelUnavailable
 from hrlearnium.policy import CLARIFICATION, REFUSAL, is_bare_followup, is_followup, policy_check
+from hrlearnium.reranking import CrossEncoderReranker, Reranker, rerank
 from hrlearnium.retrieval import Candidate, retrieve
 from hrlearnium.schemas import Principal, QueryRequest, QueryResponse, Selection, render_answer
 from hrlearnium.storage import Storage, StorageConflict
@@ -19,8 +21,19 @@ class ServiceBusy(Exception):
 
 
 class CourseService:
-    def __init__(self, settings: Settings, storage: Storage, gateway: ModelGateway):
+    def __init__(
+        self,
+        settings: Settings,
+        storage: Storage,
+        gateway: ModelGateway,
+        reranker: Reranker | None = None,
+    ):
         self.settings, self.storage, self.gateway = settings, storage, gateway
+        self.reranker = (
+            reranker or CrossEncoderReranker(settings)
+            if settings.retrieval_mode == "hybrid_rerank"
+            else None
+        )
         # Bounded model work per process; shared SQL limits protect users/tenants across workers.
         self._model_slots = threading.BoundedSemaphore(2)
 
@@ -45,7 +58,10 @@ class CourseService:
         if not parsed.passages:
             raise IngestionError("Document contains no usable course passages")
         vectors, model = None, None
-        if self.settings.model_backend != "literal" and self.settings.retrieval_mode == "hybrid":
+        if self.settings.model_backend != "literal" and self.settings.retrieval_mode in {
+            "hybrid",
+            "hybrid_rerank",
+        }:
             if not self._model_slots.acquire(blocking=False):
                 raise ServiceBusy()
             try:
@@ -72,6 +88,22 @@ class CourseService:
     def query(
         self, principal: Principal, course: str, request: QueryRequest, request_id: str
     ) -> QueryResponse:
+        with evaluation.collect(self.settings, request.include_evaluation, self.reranker) as trace:
+            result = self._query(principal, course, request, request_id)
+            if trace is not None:
+                # Loading the reranker may resolve a pinned Hub revision during this query.
+                if self.reranker:
+                    identity = self.reranker.identity()
+                    trace["reranker_resolved_revision"] = identity.get("resolved_revision")
+                    trace["configuration"]["reranker"] = {
+                        key: value for key, value in identity.items() if key != "resolved_revision"
+                    }
+                result.evaluation = trace
+            return result
+
+    def _query(
+        self, principal: Principal, course: str, request: QueryRequest, request_id: str
+    ) -> QueryResponse:
         tenant = principal.tenant_id
         conversation_id = str(request.conversation_id) if request.conversation_id else str(uuid4())
         previous = []
@@ -94,6 +126,7 @@ class CourseService:
         candidate_ids = set()
         if decision is None:
             passages, models = self.storage.search_passages(tenant, course)
+            evaluation.corpus(passages)
             if not passages:
                 decision = Selection(
                     status="refused", passage_ids=[], reason_code="insufficient_evidence"
@@ -123,26 +156,41 @@ class CourseService:
                         ]
                     else:
                         vector = None
-                        if mode == "hybrid":
+                        if mode in {"hybrid", "hybrid_rerank"}:
                             identity = self.gateway.identity()
                             if models != {identity} or any(p.embedding is None for p in passages):
                                 raise ModelUnavailable(
                                     "Course embeddings are missing or stale; reindex the course"
                                 )
-                            vector = self.gateway.embed([search_question])[0]
+                            with evaluation.stage("embedding"):
+                                vector = self.gateway.embed([search_question])[0]
                             if self.gateway.identity() != identity:
                                 raise ModelUnavailable("Embedding model changed during retrieval")
                         try:
-                            candidates = retrieve(
-                                search_question,
-                                passages,
-                                query_embedding=vector,
-                                limit=self.settings.candidate_limit,
-                            )
+                            with evaluation.stage("retrieval"):
+                                candidates = retrieve(
+                                    search_question,
+                                    passages,
+                                    query_embedding=vector,
+                                    limit=(
+                                        self.settings.rerank_pool_limit
+                                        if mode == "hybrid_rerank"
+                                        else self.settings.candidate_limit
+                                    ),
+                                )
                         except ValueError as error:
                             raise ModelUnavailable(
                                 "Invalid retrieval embeddings; reindex the course"
                             ) from error
+                        evaluation.candidates("retrieved_candidates", candidates)
+                        if mode == "hybrid_rerank":
+                            with evaluation.stage("reranking"):
+                                candidates = rerank(
+                                    search_question,
+                                    candidates,
+                                    self.reranker,
+                                    limit=self.settings.candidate_limit,
+                                )
                         context_size, bounded = 0, []
                         for candidate in candidates:
                             cost = len(candidate.passage.text) + len(
@@ -154,13 +202,17 @@ class CourseService:
                             context_size += cost
                         candidates = bounded
                     candidate_ids = {candidate.passage.id for candidate in candidates}
-                    decision = (
-                        self.gateway.select(request.question, previous, candidates)
-                        if candidates
-                        else Selection(
-                            status="refused", passage_ids=[], reason_code="insufficient_evidence"
+                    evaluation.candidates("selector_candidates", candidates)
+                    with evaluation.stage("selection"):
+                        decision = (
+                            self.gateway.select(request.question, previous, candidates)
+                            if candidates
+                            else Selection(
+                                status="refused",
+                                passage_ids=[],
+                                reason_code="insufficient_evidence",
+                            )
                         )
-                    )
                 finally:
                     self._model_slots.release()
         # Evidence IDs must be retrieved candidates, authorized current records and exact spans.
@@ -191,7 +243,8 @@ class CourseService:
             if not self._model_slots.acquire(blocking=False):
                 raise ServiceBusy()
             try:
-                explanation = self.gateway.explain(request.question, previous, excerpts)
+                with evaluation.stage("explanation"):
+                    explanation = self.gateway.explain(request.question, previous, excerpts)
                 allowed = {excerpt.id for excerpt in excerpts}
                 if any(
                     len(statement.citation_ids) != len(set(statement.citation_ids))
@@ -199,9 +252,10 @@ class CourseService:
                     for statement in explanation.statements
                 ):
                     raise ModelUnavailable("Explanation references invalid evidence")
-                supported = self.gateway.verify_explanation(
-                    request.question, previous, excerpts, explanation
-                )
+                with evaluation.stage("verification"):
+                    supported = self.gateway.verify_explanation(
+                        request.question, previous, excerpts, explanation
+                    )
                 if type(supported) is not bool:
                     raise ModelUnavailable("Invalid explanation verification")
                 if not supported:

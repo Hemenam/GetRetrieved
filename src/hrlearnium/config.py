@@ -33,7 +33,14 @@ class Settings(BaseSettings):
     selector_model: str = "qwen3:8b"
     model_timeout_seconds: float = Field(default=120, ge=1, le=300)
     allow_remote_models: bool = False
-    retrieval_mode: Literal["hybrid", "full_context"] = "hybrid"
+    retrieval_mode: Literal["hybrid", "hybrid_rerank", "full_context"] = "hybrid"
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    reranker_revision: str | None = None
+    reranker_device: str = "cpu"
+    reranker_local_files_only: bool = True
+    reranker_batch_size: int = Field(default=4, ge=1, le=32)
+    reranker_max_tokens: int = Field(default=8192, ge=128, le=32768)
+    rerank_pool_limit: int = Field(default=32, ge=2, le=100)
     enable_docs: bool = True
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, ge=1024, le=10 * 1024 * 1024)
     max_course_passages: int = Field(default=2000, ge=10, le=10000)
@@ -47,6 +54,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_runtime(self) -> "Settings":
+        self.reranker_revision = self.reranker_revision or None
+        if self.retrieval_mode == "hybrid_rerank":
+            if self.model_backend == "literal":
+                raise ValueError("hybrid_rerank requires an LLM backend")
+            if not self.reranker_model.strip():
+                raise ValueError("hybrid_rerank requires HR_RERANKER_MODEL")
+            if self.rerank_pool_limit < self.candidate_limit:
+                raise ValueError("HR_RERANK_POOL_LIMIT must be at least HR_CANDIDATE_LIMIT")
         secret = self.jwt_secret.get_secret_value()
         if len(secret) < 32 or secret.startswith("REPLACE_"):
             raise ValueError(

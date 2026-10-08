@@ -14,6 +14,7 @@ from hrlearnium.auth import require_scope
 from hrlearnium.config import Settings
 from hrlearnium.ingestion import IngestionError
 from hrlearnium.models import ModelGateway, ModelUnavailable, create_gateway
+from hrlearnium.reranking import Reranker
 from hrlearnium.schemas import (
     DocumentResponse,
     Excerpt,
@@ -62,7 +63,11 @@ class RequestLimitsMiddleware:
         await self.app(scope, bounded_receive, send)
 
 
-def create_app(settings: Settings | None = None, gateway: ModelGateway | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    gateway: ModelGateway | None = None,
+    reranker: Reranker | None = None,
+) -> FastAPI:
     settings = settings or Settings()
     storage = Storage(settings.database_path)
     gateway = gateway or create_gateway(settings)
@@ -90,7 +95,7 @@ def create_app(settings: Settings | None = None, gateway: ModelGateway | None = 
         openapi_url="/openapi.json" if settings.enable_docs else None,
     )
     app.state.settings, app.state.storage, app.state.gateway = settings, storage, gateway
-    service = CourseService(settings, storage, gateway)
+    service = CourseService(settings, storage, gateway, reranker)
     app.state.service = service
     app.add_middleware(RequestLimitsMiddleware, limit=settings.max_upload_bytes + 64 * 1024)
 
@@ -190,6 +195,9 @@ def create_app(settings: Settings | None = None, gateway: ModelGateway | None = 
             with storage.connection() as db:
                 db.execute("SELECT 1")
             result = gateway.readiness()
+            if service.reranker and hasattr(service.reranker, "readiness"):
+                result["reranker"] = service.reranker.readiness()
+                result["ready"] = bool(result.get("ready") and result["reranker"]["ready"])
             if not result.get("ready"):
                 response.status_code = 503
             return result

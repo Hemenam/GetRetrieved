@@ -8,6 +8,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from hrlearnium.config import Settings
+from hrlearnium.evaluation import provider_usage
 from hrlearnium.policy import (
     EXPLANATION_INSTRUCTIONS,
     SELECTOR_INSTRUCTIONS,
@@ -194,6 +195,13 @@ class OllamaGateway(_EvidenceGateway):
             result = response.json()
             if not isinstance(result, dict):
                 raise ValueError("Expected JSON object")
+            request_payload = kwargs.get("json", {})
+            if method == "POST":
+                usage = {
+                    "prompt_tokens": result.get("prompt_eval_count"),
+                    "completion_tokens": result.get("eval_count"),
+                }
+                provider_usage({"usage": usage}, request_payload.get("model", ""), path)
             return result
         except (httpx.HTTPError, ValueError, KeyError):
             # Do not propagate provider response bodies, source text, URLs or credentials to clients/logs.
@@ -219,7 +227,7 @@ class OllamaGateway(_EvidenceGateway):
     def readiness(self) -> dict:
         installed = self._installed_models()
         names = [self.settings.selector_model]
-        if self.settings.retrieval_mode == "hybrid":
+        if self.settings.retrieval_mode in {"hybrid", "hybrid_rerank"}:
             names.append(self.settings.embedding_model)
         return {
             "ready": all(name in installed or name + ":latest" in installed for name in names),
@@ -322,7 +330,9 @@ class OpenAICompatibleGateway(_EvidenceGateway):
             raise ModelUnavailable("Hosted model configuration is incomplete")
 
     def readiness(self) -> dict:
-        missing = self._missing_config(embeddings=self.settings.retrieval_mode == "hybrid")
+        missing = self._missing_config(
+            embeddings=self.settings.retrieval_mode in {"hybrid", "hybrid_rerank"}
+        )
         return {
             "ready": not missing,
             "backend": "openai_compatible",
@@ -355,6 +365,7 @@ class OpenAICompatibleGateway(_EvidenceGateway):
             result = response.json()
             if not isinstance(result, dict):
                 raise ValueError("Expected JSON object")
+            provider_usage(result, payload.get("model", ""), path)
             return result
         except (httpx.HTTPError, httpx.InvalidURL, ValueError, KeyError):
             raise ModelUnavailable(

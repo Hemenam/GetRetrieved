@@ -168,7 +168,10 @@ def main() -> int:
                 )
                 emit({"document": document.model_dump(), "changed": changed})
             elif args.command == "reindex":
-                if settings.model_backend == "literal" or settings.retrieval_mode != "hybrid":
+                if settings.model_backend == "literal" or settings.retrieval_mode not in {
+                    "hybrid",
+                    "hybrid_rerank",
+                }:
                     raise ValueError(
                         "Configure an LLM backend with hybrid retrieval before reindexing"
                     )

@@ -46,6 +46,10 @@ class QueryRequest(StrictModel):
             "returned by a successful request for this same user and course. Do not invent an ID."
         ),
     )
+    include_evaluation: bool = Field(
+        default=False,
+        description="Include timings, ranking and configuration for evaluation tools.",
+    )
 
 
 class Citation(StrictModel):
@@ -100,10 +104,11 @@ class QueryResponse(StrictModel):
     excerpts: list[Excerpt]
     conversation_id: str
     reason_code: str
-    retrieval_mode: Literal["lexical", "hybrid", "full_context"]
+    retrieval_mode: Literal["lexical", "hybrid", "hybrid_rerank", "full_context"]
     response_mode: ResponseMode = "verbatim"
     explanation: Explanation | None = None
     policy_version: str = POLICY_VERSION
+    evaluation: dict | None = None
 
 
 class DocumentResponse(StrictModel):

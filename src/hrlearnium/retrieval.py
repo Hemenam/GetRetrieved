@@ -30,6 +30,7 @@ class Candidate:
     lexical_score: float
     semantic_score: float | None
     rank_score: float
+    rerank_score: float | None = None
 
 
 def _unit_vector(vector: list[float], dimensions: int | None = None) -> list[float]:

@@ -11,7 +11,6 @@ import hashlib
 import json
 import math
 import os
-import statistics
 import sys
 import time
 from collections import Counter
@@ -22,6 +21,14 @@ from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+
+from hrlearnium.eval_tools import (  # noqa: E402
+    GOLD_FIELDS,
+    latency_summary,
+    load_pricing,
+    runtime_summary,
+    validate_annotations,
+)
 
 STATUSES = {"answered", "refused", "clarification"}
 CATEGORIES = {
@@ -35,6 +42,11 @@ CATEGORIES = {
     "ambiguous",
     "followup",
     "example_boundary",
+    "false_premise",
+    "contradiction",
+    "distractor",
+    "position",
+    "list_completeness",
 }
 
 
@@ -70,7 +82,7 @@ def load_cases(path: Path, limit: int | None) -> list[dict]:
             raise EvaluationError(f"Dataset line {number} is not valid JSON") from None
         valid = (
             isinstance(case, dict)
-            and required <= case.keys() <= required | {"previous_question"}
+            and required <= case.keys() <= required | {"previous_question"} | GOLD_FIELDS
             and isinstance(case["id"], str)
             and case["id"]
             and isinstance(case["category"], str)
@@ -93,6 +105,8 @@ def load_cases(path: Path, limit: int | None) -> list[dict]:
         )
         if not valid:
             raise EvaluationError(f"Dataset line {number} has an invalid case schema")
+        if not validate_annotations(case):
+            raise EvaluationError(f"Dataset line {number} has invalid instructor annotations")
         if case["id"] in identifiers:
             raise EvaluationError(f"Dataset line {number} repeats an identifier")
         if (case["expected_status"] == "answered") != bool(case["required_quotes"]):
@@ -113,6 +127,16 @@ def base_outcome(case: dict) -> dict:
         "expected_chapters": case["expected_chapters"],
         "required_quote_count": len(case["required_quotes"]),
         "has_previous_question": "previous_question" in case,
+        "previous_question": case.get("previous_question"),
+        "gold": {
+            "required_facts": case.get("required_facts", []),
+            "forbidden_claims": case.get("forbidden_claims", []),
+            "review_status": case.get("review_status", "proposed"),
+            "reviewer": case.get("reviewer", ""),
+            "split": case.get("split", "development"),
+            "scope_notes": case.get("scope_notes", ""),
+            "notes": case["notes"],
+        },
     }
 
 
@@ -121,6 +145,10 @@ def coverage(case: dict, texts: list[str], chapters: list[int | None]) -> dict:
         anchor for anchor in case["required_quotes"] if not any(anchor in text for text in texts)
     ]
     missing_chapters = sorted(set(case["expected_chapters"]) - set(chapters))
+    fact_anchors = [
+        quote for fact in case.get("required_facts", []) for quote in fact["evidence_quotes"]
+    ]
+    missing_fact_anchors = [q for q in fact_anchors if not any(q in text for text in texts)]
     return {
         "matched_quote_count": len(case["required_quotes"]) - len(missing_quotes),
         "missing_quotes": missing_quotes,
@@ -128,6 +156,10 @@ def coverage(case: dict, texts: list[str], chapters: list[int | None]) -> dict:
         "quote_coverage_complete": not missing_quotes,
         "chapter_coverage_complete": not missing_chapters,
         "required_coverage_complete": not missing_quotes and not missing_chapters,
+        "gold_evidence_anchor_count": len(fact_anchors),
+        "gold_evidence_anchor_hits": len(fact_anchors) - len(missing_fact_anchors),
+        "gold_evidence_missing_anchors": missing_fact_anchors,
+        "gold_evidence_coverage_complete": not missing_fact_anchors if fact_anchors else None,
     }
 
 
@@ -157,6 +189,10 @@ def coverage_summary(outcomes: list[dict]) -> dict:
         "complete_required_coverage": fraction(
             sum(item.get("required_coverage_complete", False) for item in positives),
             len(positives),
+        ),
+        "gold_evidence_anchor_coverage": fraction(
+            sum(item.get("gold_evidence_anchor_hits", 0) for item in positives),
+            sum(item.get("gold_evidence_anchor_count", 0) for item in positives),
         ),
     }
 
@@ -357,6 +393,7 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
     query_path = f"/v1/courses/{quote(args.course, safe='')}/query"
     outcomes = []
     seen_conversations = set()
+    candidate_cache = {}
     with httpx.Client(
         base_url=args.base_url.rstrip("/"),
         timeout=args.timeout,
@@ -377,7 +414,11 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
             started = time.perf_counter()
             stage = "setup" if case.get("previous_question") else "query"
             try:
-                body = {"question": case["question"], "response_mode": args.response_mode}
+                body = {
+                    "question": case["question"],
+                    "response_mode": args.response_mode,
+                    "include_evaluation": True,
+                }
                 if case.get("previous_question"):
                     setup = request(
                         "POST",
@@ -386,9 +427,12 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
                         json={
                             "question": case["previous_question"],
                             "response_mode": args.response_mode,
+                            "include_evaluation": True,
                         },
                     )
                     outcome["setup_status"] = setup.status
+                    outcome["setup_evaluation"] = setup.evaluation
+                    outcome["setup_response"] = setup.model_dump()
                     setup_checks = response_contract_checks(setup, args.response_mode)
                     outcome["setup_contract_checks"] = setup_checks
                     outcome["setup_failed"] = not (
@@ -423,12 +467,19 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
                         "retrieval_mode": result.retrieval_mode,
                         "policy_version": result.policy_version,
                         "reason_code": result.reason_code,
+                        "evaluation": result.evaluation,
+                        "response": result.model_dump(),
                         "excerpt_ids": [excerpt.id for excerpt in result.excerpts],
                         "returned_chapters": [
                             excerpt.citation.chapter_number for excerpt in result.excerpts
                         ],
                     }
                 )
+                expected_mode = getattr(args, "expect_retrieval_mode", None)
+                if expected_mode and result.retrieval_mode != expected_mode:
+                    raise EvaluationError(
+                        "Server retrieval mode does not match --expect-retrieval-mode"
+                    )
                 outcome.update(response_contract_checks(result, args.response_mode))
                 outcome.update(
                     coverage(
@@ -442,6 +493,7 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
                 for excerpt in result.excerpts:
                     path = f"/v1/courses/{quote(args.course, safe='')}/excerpts/{quote(excerpt.id, safe='')}"
                     stored = request("GET", path, Excerpt)
+                    candidate_cache[excerpt.id] = stored
                     check = {
                         "id": excerpt.id,
                         "stored_excerpt_matches": stored.model_dump() == excerpt.model_dump(),
@@ -456,6 +508,25 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
                         )
                     citation_checks.append(check)
                 outcome["citation_checks"] = citation_checks
+                if result.evaluation is not None:
+                    stage = "candidate_lookup"
+                    candidate_coverage = {}
+                    for name in ("retrieved_candidates", "selector_candidates"):
+                        if name not in result.evaluation:
+                            continue
+                        selected_candidates = []
+                        for candidate in result.evaluation[name]:
+                            identifier = candidate["id"]
+                            if identifier not in candidate_cache:
+                                path = f"/v1/courses/{quote(args.course, safe='')}/excerpts/{quote(identifier, safe='')}"
+                                candidate_cache[identifier] = request("GET", path, Excerpt)
+                            selected_candidates.append(candidate_cache[identifier])
+                        candidate_coverage[name] = coverage(
+                            case,
+                            [e.text for e in selected_candidates],
+                            [e.citation.chapter_number for e in selected_candidates],
+                        ) | {"candidate_count": len(selected_candidates)}
+                    outcome["candidate_coverage"] = candidate_coverage
                 outcome["citation_resolution_exact"] = all(
                     item["stored_excerpt_matches"] for item in citation_checks
                 )
@@ -470,6 +541,7 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
                 outcome["passed_automated_checks"] = bool(
                     outcome["status_matches"]
                     and outcome["required_coverage_complete"]
+                    and outcome["gold_evidence_coverage_complete"] is not False
                     and outcome["unique_excerpt_ids"]
                     and outcome["citation_resolution_exact"]
                     and outcome["response_mode_matches"]
@@ -629,6 +701,16 @@ def main(argv: list[str] | None = None) -> int:
         "--output", type=Path, help="Write JSON report to this path; otherwise print full report"
     )
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--split", choices=["development", "held_out"])
+    parser.add_argument("--approved-only", action="store_true", help="Require reviewed gold cases")
+    parser.add_argument(
+        "--expect-retrieval-mode",
+        choices=["full_context", "hybrid", "hybrid_rerank", "lexical"],
+        help="Fail a case if the running server uses another retrieval strategy",
+    )
+    parser.add_argument(
+        "--pricing", type=Path, help="Optional model prices in USD per million tokens"
+    )
     parser.add_argument("--timeout", type=float, default=180, help="API timeout in seconds")
     parser.add_argument(
         "--delay-seconds",
@@ -658,7 +740,19 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.error("--base-url must be HTTP(S), without credentials, query, or fragment")
     try:
-        cases = load_cases(args.dataset, args.limit)
+        cases = load_cases(args.dataset, None)
+        if args.split:
+            cases = [case for case in cases if case.get("split", "development") == args.split]
+        if args.approved_only:
+            cases = [case for case in cases if case.get("review_status") == "approved"]
+        if args.limit:
+            cases = cases[: args.limit]
+        if not cases:
+            raise EvaluationError("No cases match the requested split/approval filter")
+        try:
+            pricing = load_pricing(args.pricing)
+        except (ValueError, json.JSONDecodeError):
+            raise EvaluationError("Invalid pricing file") from None
         if args.mode == "retrieval":
             outcomes, metadata = retrieval_evaluation(cases, args.document)
             summary_fn = coverage_summary
@@ -668,20 +762,21 @@ def main(argv: list[str] | None = None) -> int:
         latencies = sorted(item["latency_ms"] for item in outcomes if "latency_ms" in item)
         report = {
             "created_at": datetime.now(UTC).isoformat(),
-            "dataset_status": "proposed_not_instructor_approved",
+            "dataset_status": (
+                "instructor_approved"
+                if all(c.get("review_status") == "approved" for c in cases)
+                else "proposed_not_instructor_approved"
+            ),
             "dataset_sha256": hashlib.sha256(args.dataset.read_bytes()).hexdigest(),
             "dataset_cases_loaded": len(cases),
             "metadata": metadata,
+            "runtime": runtime_summary(outcomes, pricing),
             "summary": summary_fn(outcomes),
             "by_category": {
                 category: summary_fn([item for item in outcomes if item["category"] == category])
                 for category in sorted({item["category"] for item in outcomes})
             },
-            "latency_ms": {
-                "count": len(latencies),
-                "median": statistics.median(latencies) if latencies else None,
-                "p95": latencies[math.ceil(len(latencies) * 0.95) - 1] if latencies else None,
-            },
+            "latency_ms": latency_summary(latencies),
             "outcomes": outcomes,
         }
         if args.output:

@@ -289,3 +289,67 @@ def test_cli_default_and_explicit_explained_mode_reach_http_requests(mock_api, t
     assert runner.main(argv) == 0
     assert calls[0][2]["response_mode"] == mode
     assert json.loads(report.read_text(encoding="utf-8"))["metadata"]["response_mode"] == mode
+
+
+def test_api_runner_captures_answer_and_candidate_evidence_coverage(mock_api):
+    payload = response("explained")
+    payload["evaluation"] = {
+        "selector_candidates": [{"id": EXCERPT["id"]}],
+        "stages_ms": {"selection": 1.0},
+        "provider_calls": [],
+    }
+    calls = mock_api(payload)
+    outcomes, _ = runner.api_evaluation([CASE], arguments("explained"))
+    assert calls[0][2]["include_evaluation"] is True
+    assert outcomes[0]["response"]["explanation"] == payload["explanation"]
+    assert outcomes[0]["candidate_coverage"]["selector_candidates"]["required_coverage_complete"]
+    # The separately resolved answer excerpt is reused when checking candidate coverage.
+    assert len([call for call in calls if call[0] == "GET"]) == 1
+
+
+def test_expected_retrieval_mode_detects_server_not_restarted(mock_api):
+    mock_api(response())
+    args = arguments()
+    args.expect_retrieval_mode = "full_context"
+    outcomes, _ = runner.api_evaluation([CASE], args)
+    assert outcomes[0]["evaluation_status"] == "error"
+    assert outcomes[0]["error"]["kind"] == "protocol"
+
+
+def test_annotated_case_approval_requires_meaningful_facts_and_reviewer(tmp_path):
+    path = tmp_path / "gold.jsonl"
+    case = CASE | {"review_status": "approved", "reviewer": "teacher", "required_facts": []}
+    path.write_text(json.dumps(case) + "\n", encoding="utf-8")
+    with pytest.raises(runner.EvaluationError, match="annotations"):
+        runner.load_cases(path, None)
+    case["required_facts"] = [
+        {"id": "f1", "text": "سه جزء پیام", "evidence_quotes": CASE["required_quotes"]}
+    ]
+    path.write_text(json.dumps(case) + "\n", encoding="utf-8")
+    assert runner.load_cases(path, None)[0]["review_status"] == "approved"
+
+
+def test_held_out_second_course_dataset_needs_no_first_course_fixture(mock_api, tmp_path):
+    mock_api(response())
+    case = CASE | {"id": "second-course-1", "split": "held_out"}
+    path = tmp_path / "future-course.jsonl"
+    path.write_text(json.dumps(case) + "\n", encoding="utf-8")
+    output = tmp_path / "future-course-report.json"
+    assert (
+        runner.main(
+            [
+                "--mode",
+                "api",
+                "--course",
+                "second-course",
+                "--dataset",
+                str(path),
+                "--split",
+                "held_out",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(output.read_text(encoding="utf-8"))["outcomes"][0]["id"] == "second-course-1"
