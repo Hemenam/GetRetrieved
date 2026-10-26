@@ -136,6 +136,9 @@ def base_outcome(case: dict) -> dict:
             "reviewer": case.get("reviewer", ""),
             "split": case.get("split", "development"),
             "scope_notes": case.get("scope_notes", ""),
+            **{
+                key: case[key] for key in ("expected_language", "question_family_id") if key in case
+            },
             "notes": case["notes"],
         },
     }
@@ -319,7 +322,115 @@ def auth_headers(args: argparse.Namespace):
 def response_contract_checks(result, requested_mode: str) -> dict:
     """Check rendering and links, never whether generated statements are true."""
     from hrlearnium.policy import conversational_reply, non_answer_reply
-    from hrlearnium.schemas import render_answer
+    from hrlearnium.schemas import render_answer, render_parts
+
+    if result.answer_kind == "multi":
+        checks = []
+        ids = {e.id for e in result.excerpts}
+        used = set()
+        for part in result.parts:
+            own = [e for e in result.excerpts if e.id in part.excerpt_ids]
+            used.update(part.excerpt_ids)
+            child = result.model_copy(
+                update={
+                    "status": part.status,
+                    "answer_kind": part.answer_kind,
+                    "answer": part.answer,
+                    "reason_code": part.reason_code,
+                    "excerpts": own,
+                    "explanation": part.explanation,
+                    "metadata": part.metadata,
+                    "parts": [],
+                }
+            )
+            check = response_contract_checks(child, requested_mode)
+            if part.answer_kind == "content" and part.status == "answered":
+                check["answer_canonical_render"] = (
+                    part.answer == render_answer(result.excerpts, part.explanation)
+                    if requested_mode == "explained"
+                    else part.answer == render_answer(own)
+                )
+            checks.append(check)
+        answered_count = sum(p.status == "answered" for p in result.parts)
+        expected = (
+            "answered"
+            if answered_count == len(result.parts)
+            else "partial"
+            if answered_count
+            else "error"
+            if any(p.status == "error" for p in result.parts)
+            else "clarification"
+            if all(p.status == "clarification" for p in result.parts)
+            else "refused"
+        )
+        return {
+            "requested_response_mode": requested_mode,
+            "actual_response_mode": result.response_mode,
+            "response_mode_matches": result.response_mode == requested_mode,
+            "explanation_contract_valid": bool(checks)
+            and result.explanation is None
+            and all(c["explanation_contract_valid"] for c in checks),
+            "explanation_citation_links_valid": all(
+                c["explanation_citation_links_valid"] is not False for c in checks
+            ),
+            "explanation_statement_count": sum(c["explanation_statement_count"] for c in checks),
+            "generated_explanation_human_review_required": any(
+                c["generated_explanation_human_review_required"] for c in checks
+            ),
+            "answer_canonical_render": result.answer
+            == render_parts(result.parts, result.excerpts, requested_mode)
+            and result.status == expected
+            and used == ids
+            and all(set(p.excerpt_ids) <= ids for p in result.parts)
+            and all(c["answer_canonical_render"] is not False for c in checks),
+            "answer_exactly_joined_excerpts": None,
+            "control_message_valid": all(c["control_message_valid"] is not False for c in checks),
+            "unique_excerpt_ids": len(ids) == len(result.excerpts),
+            "answered_has_excerpts": bool(result.excerpts) if answered_count else None,
+            "answer_has_evidence": bool(answered_count)
+            and all(
+                c["answer_has_evidence"]
+                for c, p in zip(checks, result.parts, strict=True)
+                if p.status == "answered"
+            ),
+        }
+
+    if result.answer_kind == "metadata":
+        from hrlearnium.course_metadata import metadata_response
+        from hrlearnium.schemas import QueryRequest
+
+        valid = result.metadata is not None and bool(result.metadata.outline.documents)
+        supported = result.status == "answered"
+        canonical = False
+        if valid:
+            expected = metadata_response(
+                result.metadata.outline,
+                QueryRequest(
+                    question="دوره" if result.metadata.language == "fa" else "course",
+                    response_mode=requested_mode,
+                ),
+                request_id=result.request_id,
+                conversation_id=result.conversation_id,
+                mode=result.retrieval_mode,
+                operation=(result.metadata.field, result.metadata.chapter_number),
+            )
+            canonical = expected.status == "answered" and expected.answer == result.answer
+        return {
+            "requested_response_mode": requested_mode,
+            "actual_response_mode": result.response_mode,
+            "response_mode_matches": result.response_mode == requested_mode,
+            "explanation_contract_valid": result.explanation is None and not result.excerpts,
+            "explanation_citation_links_valid": None,
+            "explanation_statement_count": 0,
+            "generated_explanation_human_review_required": False,
+            "answer_canonical_render": canonical if supported else None,
+            "answer_exactly_joined_excerpts": None,
+            "control_message_valid": result.metadata is None if not supported else None,
+            "unique_excerpt_ids": not result.excerpts,
+            "answered_has_excerpts": False if supported else None,
+            "answer_has_evidence": valid if supported else False,
+            "metadata_answer_review_required": supported,
+        }
 
     answered = result.status == "answered"
     excerpt_ids = [excerpt.id for excerpt in result.excerpts]
@@ -381,6 +492,7 @@ def response_contract_checks(result, requested_mode: str) -> dict:
         ),
         "unique_excerpt_ids": len(set(excerpt_ids)) == len(excerpt_ids),
         "answered_has_excerpts": bool(result.excerpts) if answered else None,
+        "answer_has_evidence": bool(result.excerpts) if answered else False,
     }
 
 
@@ -429,20 +541,26 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
                     "response_mode": args.response_mode,
                     "include_evaluation": True,
                 }
+                requested_retrieval = getattr(args, "retrieval_mode", None)
+                if requested_retrieval:
+                    body["retrieval_mode"] = requested_retrieval
                 if case.get("previous_question"):
                     setup = request(
                         "POST",
                         query_path,
                         QueryResponse,
-                        json={
-                            "question": case["previous_question"],
-                            "response_mode": args.response_mode,
-                            "include_evaluation": True,
-                        },
+                        json=body | {"question": case["previous_question"]},
                     )
                     outcome["setup_status"] = setup.status
                     outcome["setup_evaluation"] = setup.evaluation
                     outcome["setup_response"] = setup.model_dump()
+                    expected_mode = requested_retrieval or getattr(
+                        args, "expect_retrieval_mode", None
+                    )
+                    if expected_mode and setup.retrieval_mode != expected_mode:
+                        raise EvaluationError(
+                            "Setup retrieval mode does not match the requested mode"
+                        )
                     setup_checks = response_contract_checks(setup, args.response_mode)
                     outcome["setup_contract_checks"] = setup_checks
                     outcome["setup_failed"] = not (
@@ -485,7 +603,7 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
                         ],
                     }
                 )
-                expected_mode = getattr(args, "expect_retrieval_mode", None)
+                expected_mode = requested_retrieval or getattr(args, "expect_retrieval_mode", None)
                 if expected_mode and result.retrieval_mode != expected_mode:
                     raise EvaluationError(
                         "Server retrieval mode does not match --expect-retrieval-mode"
@@ -540,12 +658,25 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
                 outcome["citation_resolution_exact"] = all(
                     item["stored_excerpt_matches"] for item in citation_checks
                 )
+                metadata_sources = ([result.metadata] if result.metadata else []) + [
+                    part.metadata for part in result.parts if part.metadata is not None
+                ]
+                outcome["metadata_resolution_exact"] = None
+                if metadata_sources:
+                    from hrlearnium.schemas import CourseOutline
+
+                    outline = request(
+                        "GET", f"/v1/courses/{quote(args.course, safe='')}/outline", CourseOutline
+                    )
+                    outcome["metadata_resolution_exact"] = all(
+                        source.outline == outline for source in metadata_sources
+                    )
                 source_matches = all(
                     item.get("local_source_span_matches", True) for item in citation_checks
                 )
                 output_valid = (
-                    outcome["answer_canonical_render"] and outcome["answered_has_excerpts"]
-                    if result.status == "answered"
+                    outcome["answer_canonical_render"] and outcome["answer_has_evidence"]
+                    if result.status in {"answered", "partial"}
                     else outcome["control_message_valid"]
                 )
                 outcome["passed_automated_checks"] = bool(
@@ -554,6 +685,7 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
                     and outcome["gold_evidence_coverage_complete"] is not False
                     and outcome["unique_excerpt_ids"]
                     and outcome["citation_resolution_exact"]
+                    and outcome["metadata_resolution_exact"] is not False
                     and outcome["response_mode_matches"]
                     and outcome["explanation_contract_valid"]
                     and outcome["explanation_citation_links_valid"] is not False
@@ -584,6 +716,7 @@ def api_evaluation(cases: list[dict], args: argparse.Namespace) -> tuple[list[di
         "base_url": args.base_url.rstrip("/"),
         "course": args.course,
         "response_mode": args.response_mode,
+        "requested_retrieval_mode": getattr(args, "retrieval_mode", None),
         "tenant_label": args.tenant,
         "subject_label": args.subject,
         "authentication": "local_short_lived_per_request" if args.local_auth else "HR_EVAL_TOKEN",
@@ -721,6 +854,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split", choices=["development", "held_out"])
     parser.add_argument("--approved-only", action="store_true", help="Require reviewed gold cases")
     parser.add_argument(
+        "--retrieval-mode",
+        choices=["full_context", "hybrid", "hybrid_rerank"],
+        help="Select retrieval per request, including follow-up setup turns",
+    )
+    parser.add_argument(
         "--expect-retrieval-mode",
         choices=["full_context", "hybrid", "hybrid_rerank", "lexical"],
         help="Fail a case if the running server uses another retrieval strategy",
@@ -736,6 +874,12 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional pause between API cases for rate limits",
     )
     args = parser.parse_args(argv)
+    if (
+        args.retrieval_mode
+        and args.expect_retrieval_mode
+        and args.retrieval_mode != args.expect_retrieval_mode
+    ):
+        parser.error("--retrieval-mode and --expect-retrieval-mode must agree")
     if args.limit is not None and args.limit < 1:
         parser.error("--limit must be positive")
     if args.timeout <= 0 or not math.isfinite(args.timeout):

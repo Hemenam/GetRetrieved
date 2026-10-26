@@ -114,6 +114,7 @@ def test_loading_is_lazy_local_only_and_remote_code_is_disabled(monkeypatch):
 
         def predict(self, pairs, **kwargs):
             predictions.append(pairs)
+            assert kwargs["activation_fct"]([-2.0, 4.0]) == [-2.0, 4.0]
             return [float(i) for i in range(len(pairs))]
 
     monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(CrossEncoder=Encoder))
@@ -127,6 +128,25 @@ def test_loading_is_lazy_local_only_and_remote_code_is_disabled(monkeypatch):
     assert constructors[0][1]["revision"] is None
     assert predictions[0][0][1] == "فصل\nمتن 1"
     assert ranker.identity()["resolved_revision"] == "pinned-commit"
+
+
+def test_new_predict_api_receives_raw_logit_activation_without_ml_imports():
+    class Tokenizer:
+        model_max_length = 8192
+
+        def __call__(self, pairs, **kwargs):
+            return {"input_ids": [[1, 2] for _ in pairs]}
+
+    class Encoder:
+        tokenizer = Tokenizer()
+
+        def predict(self, pairs, *, activation_fn=None, **kwargs):
+            assert activation_fn is not None
+            return activation_fn([-8.0, 3.0, 1.0])
+
+    ranker = CrossEncoderReranker(settings())
+    ranker._encoder = Encoder()
+    assert ranker.score("سوال", candidates()) == [-8.0, 3.0, 1.0]
 
 
 def test_missing_dependency_and_overlong_evidence_fail_without_truncation(monkeypatch):
@@ -144,3 +164,30 @@ def test_missing_dependency_and_overlong_evidence_fail_without_truncation(monkey
     ranker._encoder = SimpleNamespace(tokenizer=Tokenizer())
     with pytest.raises(ModelUnavailable, match="not truncated"):
         ranker.score("سوال", candidates())
+
+
+def test_readiness_requires_local_assets_without_loading_runtime_or_downloading(monkeypatch):
+    monkeypatch.setattr("hrlearnium.reranking.find_spec", lambda name: object())
+    ranker = CrossEncoderReranker(settings())
+    monkeypatch.setattr(ranker, "_local_files_present", lambda: False)
+    assert ranker.readiness()["ready"] is False
+    assert ranker.readiness()["missing_dependencies"] == []
+    assert ranker.readiness()["download_required"] is True
+    monkeypatch.setattr(ranker, "_local_files_present", lambda: True)
+    status = ranker.readiness()
+    assert status["ready"] is True
+    assert status["model_files_available"] is True
+    assert status["model_loaded"] is False and status["inference_verified"] is False
+    assert ranker._encoder is None
+
+
+def test_readiness_reports_missing_runtime_and_explicitly_enabled_downloads(monkeypatch):
+    monkeypatch.setattr("hrlearnium.reranking.find_spec", lambda name: None)
+    ranker = CrossEncoderReranker(settings())
+    assert ranker.readiness()["missing_dependencies"] == ["hrlearnium-chatbot[rerank]"]
+    assert not ranker.readiness()["ready"]
+    monkeypatch.setattr("hrlearnium.reranking.find_spec", lambda name: object())
+    ranker = CrossEncoderReranker(settings(reranker_local_files_only=False))
+    monkeypatch.setattr(ranker, "_local_files_present", lambda: False)
+    assert ranker.readiness()["ready"]
+    assert ranker.readiness()["download_required"]

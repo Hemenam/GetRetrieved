@@ -2,28 +2,160 @@ import hashlib
 import json
 import math
 import re
+import time
 from typing import Protocol, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from hrlearnium.config import Settings
-from hrlearnium.evaluation import provider_usage
+from hrlearnium.core_config import CoreSettings
+from hrlearnium.evaluation import (
+    ERROR_CODES,
+    provider_attempt,
+    provider_usage,
+    review_contract_check,
+    stage,
+)
+from hrlearnium.language import response_context
 from hrlearnium.policy import (
+    ANSWER_REPAIR_INSTRUCTIONS,
+    ANSWER_REVIEW_INSTRUCTIONS,
+    BRIEF_WRITING_INSTRUCTIONS,
+    COMPLETE_SELECTION_INSTRUCTIONS,
+    COMPLETE_VERIFICATION_INSTRUCTIONS,
+    EVIDENCE_BRIEF_INSTRUCTIONS,
     EXPLANATION_INSTRUCTIONS,
+    LANGUAGE_REPAIR_INSTRUCTIONS,
+    PLAN_VERIFICATION_INSTRUCTIONS,
+    PLANNING_INSTRUCTIONS,
+    REQUEST_PLAN_REPAIR_INSTRUCTIONS,
+    REQUEST_PLAN_VERIFICATION_INSTRUCTIONS,
+    REQUEST_PLANNING_INSTRUCTIONS,
+    ROUTE_VERIFICATION_INSTRUCTIONS,
+    ROUTING_INSTRUCTIONS,
     SELECTOR_INSTRUCTIONS,
+    SPAN_REVIEW_INSTRUCTIONS,
+    UNIT_ROUTING_INSTRUCTIONS,
     VERIFICATION_INSTRUCTIONS,
 )
 from hrlearnium.retrieval import Candidate
-from hrlearnium.schemas import Excerpt, Explanation, ExplanationVerification, Selection
+from hrlearnium.schemas import (
+    AnswerReview,
+    CompleteSelection,
+    CompleteVerification,
+    EvidenceBrief,
+    EvidenceDecisionEnvelopeBase,
+    Excerpt,
+    Explanation,
+    ExplanationVerification,
+    PlanVerification,
+    QuestionPlan,
+    RequestPlan,
+    RequestPlanVerification,
+    RoutePlan,
+    Selection,
+    SpanAnswerReview,
+    TranslatedQuestionPlan,
+    UnitRoutes,
+    UntranslatedQuestionPlan,
+)
+from hrlearnium.selection_contract import brief_decision_model, decision_model
+from hrlearnium.source_spans import source_spans
 from hrlearnium.text import normalize_persian
 
 
 class ModelUnavailable(Exception):
     """Infrastructure/protocol error, distinct from a valid evidence-based refusal."""
 
+    def __init__(self, message: str, *, code="model_unavailable", provider_status=None):
+        super().__init__(message)
+        self.diagnostic_code = (
+            code if isinstance(code, str) and code in ERROR_CODES else "model_unavailable"
+        )
+        self.provider_status = (
+            provider_status
+            if type(provider_status) is int and 400 <= provider_status <= 599
+            else None
+        )
+
 
 class ModelGateway(Protocol):
+    def review_grounded_answer(
+        self,
+        question,
+        previous,
+        excerpts,
+        explanation,
+        plan,
+        *,
+        evidence_map=None,
+        language_repair_of=None,
+        context_excerpts=(),
+    ) -> SpanAnswerReview: ...
+    def route_request(self, question, history, context, *, translate) -> RoutePlan: ...
+    def repair_route(
+        self, question, history, context, proposed, failure, *, translate
+    ) -> RoutePlan: ...
+    def verify_route(self, question, history, context, route) -> RequestPlanVerification: ...
+    def repair_explanation(
+        self, question, history, excerpts, draft, plan, verification
+    ) -> Explanation: ...
+    def review_answer(
+        self,
+        question,
+        previous,
+        excerpts,
+        explanation,
+        plan,
+        *,
+        evidence_map=None,
+        language_repair_of=None,
+    ) -> AnswerReview: ...
+    def plan_request(
+        self, question: str, previous_questions: list[str], *, translate: bool, target_language: str
+    ) -> RequestPlan: ...
+    def repair_request_plan(
+        self, question, previous_questions, plan, failure, *, translate, target_language
+    ) -> RequestPlan: ...
+    def verify_request_plan(
+        self, question: str, previous_questions: list[str], plan: RequestPlan
+    ) -> RequestPlanVerification: ...
+    def repair_language(
+        self, question, previous_questions, excerpts, explanation
+    ) -> Explanation: ...
+    def verify_plan(
+        self, question: str, previous_questions: list[str], plan: QuestionPlan
+    ) -> PlanVerification: ...
+    def plan(
+        self, question: str, previous_questions: list[str], *, translate: bool
+    ) -> QuestionPlan: ...
+    def select_complete(
+        self,
+        question: str,
+        previous_questions: list[str],
+        candidates: list[Candidate],
+        plan: QuestionPlan,
+    ) -> CompleteSelection: ...
+    def explain_complete(
+        self,
+        question: str,
+        previous_questions: list[str],
+        excerpts: list[Excerpt],
+        plan: QuestionPlan,
+        *,
+        evidence_map: CompleteSelection | None = None,
+    ) -> Explanation: ...
+    def verify_complete(
+        self,
+        question: str,
+        previous_questions: list[str],
+        excerpts: list[Excerpt],
+        explanation: Explanation,
+        plan: QuestionPlan,
+        *,
+        evidence_map: CompleteSelection | None = None,
+        language_repair_of: Explanation | None = None,
+    ) -> CompleteVerification: ...
     def embed(self, texts: list[str]) -> list[list[float]]: ...
     def select(
         self, question: str, previous_questions: list[str], candidates: list[Candidate]
@@ -88,7 +220,15 @@ def _normalized_vectors(values, count: int, dimensions: int | None):
 
 
 def _content_limit(model: type[BaseModel]) -> int:
-    return 20000 if model is Explanation else 1000 if model is ExplanationVerification else 12000
+    if model in {RequestPlan, RoutePlan, UnitRoutes}:
+        return 32000
+    return (
+        24000
+        if model in {Explanation, AnswerReview, SpanAnswerReview, EvidenceBrief}
+        else 1000
+        if model is ExplanationVerification
+        else 12000
+    )
 
 
 def _validate_structured(content: str, model: type[StructuredResult]) -> StructuredResult:
@@ -100,7 +240,150 @@ def _validate_structured(content: str, model: type[StructuredResult]) -> Structu
 
 
 class _EvidenceGateway:
-    settings: Settings
+    settings: CoreSettings
+
+    def route_units(self, units, history, context, *, translate):
+        schema = UnitRoutes.model_json_schema()
+        schema["$defs"]["UnitRoute"]["properties"]["unit_index"] = {
+            "type": "integer",
+            "enum": list(range(len(units))),
+        }
+        if not translate:
+            schema["$defs"]["UnitRoute"]["properties"]["persian_query"] = {"type": "null"}
+        return self._structured(
+            UnitRoutes,
+            UNIT_ROUTING_INSTRUCTIONS,
+            {
+                "units": [{"unit_index": i, "text": text} for i, text in enumerate(units)],
+                "previous_questions": history,
+                "course_outline": context,
+                "translate_to_persian": translate,
+            },
+            schema,
+        )
+
+    def prepare_evidence(
+        self, question, previous, candidates, plan, *, max_sources=None, feedback=None
+    ):
+        from hrlearnium.grounding import overview_brief, requested_value_kind
+        from hrlearnium.request_units import evidence_obligations, is_course_overview
+
+        budget = max_sources or self.settings.max_excerpts
+        if is_course_overview(question) and feedback is None:
+            literal = overview_brief(candidates, budget)
+            if literal is not None:
+                return literal
+
+        spans = source_spans([c.passage for c in candidates])
+        if not spans or len(spans) > 450:
+            raise ModelUnavailable("Invalid evidence catalog bounds", code="invalid_evidence_brief")
+        compact = bool(
+            re.search(r"همیشه|\balways\b|یعنی|\bdoes that mean\b", normalize_persian(question))
+        )
+        model = brief_decision_model(
+            [c.passage.id for c in candidates], budget, max_facts=2 if compact else 8
+        )
+        result = self._structured(
+            model,
+            EVIDENCE_BRIEF_INSTRUCTIONS
+            + "\nReturn decision. Select the smallest complete source_ids list within the fixed budget. Facts use source_indices into that list, NEVER passage IDs or span IDs. For required_value_kind, requested_values must contain the actual literal requested names/numbers/medication values and their source_index. Questions, role labels and template placeholders are NOT values; if no such value exists return refused. For all other requests requested_values=[]. When review_feedback is supplied, repair its actual failures: remove incidental rejected claims or cite their genuinely supporting source. Never replay a rejected claim with the same insufficient citation. Facts needed only for background, unrequested examples and unrelated actors should be omitted. The original question, not the rejected draft, defines completeness.",
+            {
+                "question": question,
+                "previous_questions": previous,
+                "requirements": plan.requirements,
+                "max_excerpts": budget,
+                "answer_obligations": evidence_obligations(question),
+                "review_feedback": feedback.model_dump()
+                if hasattr(feedback, "model_dump")
+                else feedback
+                if isinstance(feedback, dict)
+                else None,
+                "required_value_kind": requested_value_kind(question),
+                "source_context": [
+                    {
+                        "id": c.passage.id,
+                        "text": c.passage.text,
+                        "chapter_title": c.passage.chapter_title,
+                        "section_kind": c.passage.section_kind,
+                    }
+                    for c in candidates
+                ],
+                **response_context(question),
+            },
+            model.model_json_schema(),
+        )
+        decision = result.model_dump(mode="json")["decision"]
+        if decision["status"] != "answered":
+            return EvidenceBrief(
+                status=decision["status"],
+                reason_code=decision["reason_code"],
+                complete=False,
+                facts=[],
+            )
+        ids = decision["source_ids"]
+        return EvidenceBrief(
+            status="answered",
+            reason_code="supported",
+            complete=True,
+            facts=[
+                {
+                    "text": f["text"],
+                    "span_ids": list(
+                        dict.fromkeys(
+                            s["id"]
+                            for s in spans
+                            if s["citation_id"] in {ids[i] for i in f["source_indices"]}
+                        )
+                    ),
+                }
+                for f in decision["facts"]
+            ],
+            requested_values=[
+                {"value": v["value"], "source_id": ids[v["source_index"]]}
+                for v in decision["requested_values"]
+            ],
+        )
+
+    def explain_from_brief(self, question, previous, excerpts, plan, brief):
+        from hrlearnium.request_units import is_course_overview
+
+        payload = self._explanation_payload(question, previous, excerpts)
+        payload["approved_facts"] = brief.model_dump()
+        spans = {s["id"]: s for s in source_spans(excerpts)}
+        by_id = {e.id: e for e in excerpts}
+        for fact in payload["approved_facts"]["facts"]:
+            kinds = {
+                by_id[spans[s]["citation_id"]].citation.section_kind
+                for s in fact["span_ids"]
+                if s in spans and spans[s]["citation_id"] in by_id
+            }
+            # Server-owned scope is attached before prose generation, rather than
+            # relying on the writer to rediscover it from a distant passage.
+            if kinds and kinds <= {"example", "exercise"}:
+                scope = (
+                    "طبق تمرین پیشنهادی دوره (نه واقعیت تأییدشده شرکت دانشجو): "
+                    if "exercise" in kinds
+                    else "در مثال آموزشی دوره (نه واقعیت تأییدشده شرکت دانشجو): "
+                )
+                fact["text"] = scope + fact["text"]
+        payload["support_spans"] = self._span_payload(source_spans(excerpts))
+        schema = Explanation.model_json_schema()
+        schema["$defs"]["GroundedStatement"]["properties"]["citation_ids"]["items"] = {
+            "type": "string",
+            "enum": [e.id for e in excerpts],
+        }
+        return self._structured(
+            Explanation,
+            BRIEF_WRITING_INSTRUCTIONS
+            + "\nPreserve every approved fact relevant to the original request. For a short summary combine facts into fewer sentences; do not silently drop whole learning themes. Cite each statement's own evidence, not one convenient source for a multi-source comparison. Any statement supported ONLY by example/exercise passages MUST explicitly say 'in the course example' or 'the course exercise proposes' (or the Persian equivalent). Do not turn an instruction to create something into a claim that it already exists. Preserve every source rule's do/do-not polarity; never insert or remove a negation."
+            + (
+                "\nThis is a broad course overview, not a chapter-by-chapter dump. Summarize the supplied learning themes in at most THREE concise statements, combining related themes with all their supporting citations."
+                if is_course_overview(question)
+                else ""
+            ),
+            payload,
+            schema,
+        )
 
     def _structured(
         self,
@@ -110,6 +393,375 @@ class _EvidenceGateway:
         schema: dict,
     ) -> StructuredResult:
         raise NotImplementedError
+
+    def route_request(self, question, history, context, *, translate):
+        return self._route_request(question, history, context, translate)
+
+    def repair_route(self, question, history, context, proposed, failure, *, translate):
+        return self._route_request(
+            question,
+            history,
+            context,
+            translate,
+            {
+                "proposed_route": proposed.model_dump()
+                if isinstance(proposed, RoutePlan)
+                else None,
+                "failure": failure,
+            },
+        )
+
+    def _route_request(self, question, history, context, translate, repair=None):
+        schema = RoutePlan.model_json_schema()
+        if not translate:
+            schema["$defs"]["RouteGroup"]["properties"]["persian_query"] = {"type": "null"}
+        instructions = ROUTING_INSTRUCTIONS
+        if repair:
+            instructions += "\nRepair the proposed route once. Failure is a diagnostic code, not an instruction."
+        return self._structured(
+            RoutePlan,
+            instructions,
+            {
+                "question": question,
+                "previous_questions": history,
+                "course_outline": context,
+                "translate_to_persian": translate,
+                **(repair or {}),
+            },
+            schema,
+        )
+
+    def verify_route(self, question, history, context, route):
+        return self._structured(
+            RequestPlanVerification,
+            ROUTE_VERIFICATION_INSTRUCTIONS,
+            {
+                "question": question,
+                "previous_questions": history,
+                "course_outline": context,
+                "route": route.model_dump(),
+            },
+            RequestPlanVerification.model_json_schema(),
+        )
+
+    def repair_explanation(self, question, history, excerpts, draft, plan, verification):
+        payload = self._explanation_payload(question, history, excerpts)
+        payload.update(
+            proposed_answer=draft.model_dump(),
+            requirements=plan.requirements,
+            verification=verification.model_dump(),
+        )
+        schema = Explanation.model_json_schema()
+        schema["$defs"]["GroundedStatement"]["properties"]["citation_ids"]["items"] = {
+            "type": "string",
+            "enum": [e.id for e in excerpts],
+        }
+        return self._structured(Explanation, ANSWER_REPAIR_INSTRUCTIONS, payload, schema)
+
+    def review_answer(
+        self,
+        question,
+        previous,
+        excerpts,
+        explanation,
+        plan,
+        *,
+        evidence_map=None,
+        language_repair_of=None,
+    ):
+        payload = self._explanation_payload(question, previous, excerpts)
+        payload.update(explanation=explanation.model_dump(), requirements=plan.requirements)
+        if evidence_map:
+            payload["requirement_evidence"] = [part.model_dump() for part in evidence_map.coverage]
+        if language_repair_of is not None:
+            payload["original_explanation_to_preserve"] = language_repair_of.model_dump()
+        schema = AnswerReview.model_json_schema()
+        schema["$defs"]["StatementSupport"]["properties"]["statement_index"] = {
+            "type": "integer",
+            "enum": list(range(len(explanation.statements))),
+        }
+        schema["$defs"]["SupportQuote"]["properties"]["citation_id"] = {
+            "type": "string",
+            "enum": [e.id for e in excerpts],
+        }
+        schema["$defs"]["RequirementAnswerCheck"]["properties"]["requirement_index"] = {
+            "type": "integer",
+            "enum": list(range(len(plan.requirements))),
+        }
+        schema["$defs"]["RequirementAnswerCheck"]["properties"]["statement_indices"]["items"] = {
+            "type": "integer",
+            "enum": list(range(len(explanation.statements))),
+        }
+        return self._structured(AnswerReview, ANSWER_REVIEW_INSTRUCTIONS, payload, schema)
+
+    def review_grounded_answer(
+        self,
+        question,
+        previous,
+        excerpts,
+        explanation,
+        plan,
+        *,
+        evidence_map=None,
+        language_repair_of=None,
+        context_excerpts=(),
+    ):
+        payload = self._explanation_payload(question, previous, excerpts)
+        spans = source_spans(excerpts)
+        if not spans or len(spans) > 450:
+            raise ModelUnavailable("Source span catalog exceeds supported bounds")
+        payload.update(
+            explanation=explanation.model_dump(),
+            requirements=plan.requirements,
+            support_spans=self._span_payload(spans),
+            candidate_context=[
+                self._source_payload(e)
+                for e in context_excerpts
+                if e.id not in {s.id for s in excerpts}
+            ],
+        )
+        if evidence_map:
+            payload["requirement_evidence"] = [p.model_dump() for p in evidence_map.coverage]
+        if language_repair_of is not None:
+            payload["original_explanation_to_preserve"] = language_repair_of.model_dump()
+        schema = SpanAnswerReview.model_json_schema()
+        schema["$defs"]["SpanStatementSupport"]["properties"]["span_ids"]["items"] = {
+            "type": "string",
+            "enum": [s["id"] for s in spans],
+        }
+        schema["$defs"]["SpanStatementSupport"]["properties"]["statement_index"] = {
+            "type": "integer",
+            "enum": list(range(len(explanation.statements))),
+        }
+        schema["$defs"]["RequirementAnswerCheck"]["properties"]["requirement_index"] = {
+            "type": "integer",
+            "enum": list(range(len(plan.requirements))),
+        }
+        schema["$defs"]["RequirementAnswerCheck"]["properties"]["statement_indices"]["items"] = {
+            "type": "integer",
+            "enum": list(range(len(explanation.statements))),
+        }
+        from hrlearnium.answer_contracts import conservative_rejection, review_contract_issues
+
+        review = self._structured(SpanAnswerReview, SPAN_REVIEW_INSTRUCTIONS, payload, schema)
+        issues = review_contract_issues(review, len(explanation.statements), len(plan.requirements))
+        review_contract_check(1, review, issues)
+        if not issues:
+            return review
+        # One correction of the REVIEW, not a rewrite of a potentially correct answer.
+        # Preserve the original question, draft, evidence and rejection; never flip flags locally.
+        payload["review_contract_feedback"] = {
+            "issues": issues,
+            "previous_review": review.model_dump(),
+        }
+        with stage("review_contract_repair"):
+            review = self._structured(
+                SpanAnswerReview,
+                SPAN_REVIEW_INSTRUCTIONS
+                + "\nYour previous review violated the local consistency contract. Independently re-audit the UNCHANGED draft and evidence. Return consistent checks and specific reasons for any rejection. Do not accept just to remove the contradiction, and do not rewrite the answer.",
+                payload,
+                schema,
+            )
+        issues = review_contract_issues(review, len(explanation.statements), len(plan.requirements))
+        review_contract_check(2, review, issues)
+        if issues:
+            rejected = conservative_rejection(review, issues)
+            if rejected is None or review_contract_issues(
+                rejected, len(explanation.statements), len(plan.requirements)
+            ):
+                raise ModelUnavailable("Inconsistent answer reviewer", code="invalid_answer_review")
+            review_contract_check(2, rejected, [], conservative_rejection=True)
+            return rejected
+        return review
+
+    def plan(
+        self, question: str, previous_questions: list[str], *, translate: bool
+    ) -> QuestionPlan:
+        # A nullable field leaves both choices valid under strict generation. Encode the
+        # request's setting in the schema AND local type, rather than hoping the prompt
+        # wins and rejecting otherwise valid Persian questions after a billable call.
+        model = TranslatedQuestionPlan if translate else UntranslatedQuestionPlan
+        return self._structured(
+            model,
+            PLANNING_INSTRUCTIONS,
+            {
+                "question": question,
+                "previous_questions": previous_questions,
+                "translate_to_persian": translate,
+            },
+            model.model_json_schema(),
+        )
+
+    def plan_request(self, question, previous_questions, *, translate, target_language):
+        return self._request_plan(question, previous_questions, translate, target_language)
+
+    def repair_request_plan(
+        self, question, previous_questions, plan, failure, *, translate, target_language
+    ):
+        return self._request_plan(
+            question,
+            previous_questions,
+            translate,
+            target_language,
+            repair={
+                "proposed_plan": plan.model_dump() if isinstance(plan, RequestPlan) else None,
+                "failure": failure,
+            },
+        )
+
+    def _request_plan(self, question, previous_questions, translate, target_language, repair=None):
+        schema = RequestPlan.model_json_schema()
+        schema["properties"]["answer_language"] = {"type": "string", "enum": [target_language]}
+        if not translate:
+            schema["$defs"]["RequestGroup"]["properties"]["persian_query"] = {"type": "null"}
+        return self._structured(
+            RequestPlan,
+            REQUEST_PLANNING_INSTRUCTIONS + (REQUEST_PLAN_REPAIR_INSTRUCTIONS if repair else ""),
+            {
+                "question": question,
+                "previous_questions": previous_questions,
+                "translate_to_persian": translate,
+                "target_language": target_language,
+                **(repair or {}),
+            },
+            schema,
+        )
+
+    def verify_request_plan(self, question, previous_questions, plan):
+        return self._structured(
+            RequestPlanVerification,
+            REQUEST_PLAN_VERIFICATION_INSTRUCTIONS,
+            {
+                "question": question,
+                "previous_questions": previous_questions,
+                "plan": plan.model_dump(),
+            },
+            RequestPlanVerification.model_json_schema(),
+        )
+
+    def repair_language(self, question, previous_questions, excerpts, explanation):
+        payload = self._explanation_payload(question, previous_questions, excerpts)
+        payload["proposed_answer"] = explanation.model_dump()
+        schema = Explanation.model_json_schema()
+        schema["properties"]["statements"].update(
+            minItems=len(explanation.statements), maxItems=len(explanation.statements)
+        )
+        schema["$defs"]["GroundedStatement"]["properties"]["citation_ids"]["items"] = {
+            "type": "string",
+            "enum": [e.id for e in excerpts],
+        }
+        return self._structured(Explanation, LANGUAGE_REPAIR_INSTRUCTIONS, payload, schema)
+
+    def verify_plan(self, question, previous_questions, plan):
+        return self._structured(
+            PlanVerification,
+            PLAN_VERIFICATION_INSTRUCTIONS,
+            {
+                "question": question,
+                "previous_questions": previous_questions,
+                "requirements": plan.requirements,
+            },
+            PlanVerification.model_json_schema(),
+        )
+
+    def select_complete(
+        self,
+        question: str,
+        previous_questions: list[str],
+        candidates: list[Candidate],
+        plan: QuestionPlan,
+    ) -> CompleteSelection:
+        if not candidates:
+            raise ModelUnavailable("Evidence selection requires candidate passages")
+        ids = [c.passage.id for c in candidates]
+        model = decision_model(ids, len(plan.requirements), self.settings.max_excerpts)
+        schema = model.model_json_schema()
+        result = self._structured(
+            model,
+            COMPLETE_SELECTION_INSTRUCTIONS,
+            {
+                "question": question,
+                "previous_questions": previous_questions,
+                "requirements": plan.requirements,
+                "max_excerpts": self.settings.max_excerpts,
+                "passages": [
+                    {
+                        "id": c.passage.id,
+                        "text": c.passage.text,
+                        "chapter_number": c.passage.chapter_number,
+                        "chapter_title": c.passage.chapter_title,
+                        "section_kind": c.passage.section_kind,
+                    }
+                    for c in candidates
+                ],
+            },
+            schema,
+        )
+        decision = result.model_dump(mode="json")["decision"]
+        coverage = []
+        if decision["status"] == "answered":
+            for index in range(len(plan.requirements)):
+                references = decision["coverage"][f"r{index}"]
+                # Repeated IDs/references are harmless metadata: canonicalize without
+                # inventing facts, dropping a part, or exceeding the global budget.
+                ids_for_part = list(dict.fromkeys(decision["source_ids"][i] for i in references))
+                coverage.append({"requirement_index": index, "passage_ids": ids_for_part})
+        ids = list(dict.fromkeys(id_ for part in coverage for id_ in part["passage_ids"]))
+        return CompleteSelection(
+            selection=Selection(
+                status=decision["status"], reason_code=decision["reason_code"], passage_ids=ids
+            ),
+            coverage=coverage,
+        )
+
+    def explain_complete(
+        self,
+        question: str,
+        previous_questions: list[str],
+        excerpts: list[Excerpt],
+        plan: QuestionPlan,
+        *,
+        evidence_map: CompleteSelection | None = None,
+    ) -> Explanation:
+        return self.explain(
+            question,
+            previous_questions,
+            excerpts,
+            requirements=plan.requirements,
+            requirement_evidence=[part.model_dump() for part in evidence_map.coverage]
+            if evidence_map
+            else None,
+        )
+
+    def verify_complete(
+        self,
+        question: str,
+        previous_questions: list[str],
+        excerpts: list[Excerpt],
+        explanation: Explanation,
+        plan: QuestionPlan,
+        *,
+        evidence_map: CompleteSelection | None = None,
+        language_repair_of: Explanation | None = None,
+    ) -> CompleteVerification:
+        payload = self._explanation_payload(question, previous_questions, excerpts)
+        payload.update(requirements=plan.requirements, explanation=explanation.model_dump())
+        if language_repair_of is not None:
+            payload["original_explanation_to_preserve"] = language_repair_of.model_dump()
+        if evidence_map is not None:
+            payload["requirement_evidence"] = [part.model_dump() for part in evidence_map.coverage]
+        schema = CompleteVerification.model_json_schema()
+        schema["$defs"]["RequirementAnswerCheck"]["properties"]["requirement_index"] = {
+            "type": "integer",
+            "enum": list(range(len(plan.requirements))),
+        }
+        schema["$defs"]["RequirementAnswerCheck"]["properties"]["statement_indices"]["items"] = {
+            "type": "integer",
+            "enum": list(range(len(explanation.statements))),
+        }
+        return self._structured(
+            CompleteVerification, COMPLETE_VERIFICATION_INSTRUCTIONS, payload, schema
+        )
 
     def select(
         self, question: str, previous_questions: list[str], candidates: list[Candidate]
@@ -139,19 +791,51 @@ class _EvidenceGateway:
         return self._structured(Selection, SELECTOR_INSTRUCTIONS, payload, schema)
 
     @staticmethod
+    def _source_payload(e):
+        return {
+            "id": e.id,
+            "text": e.text,
+            "chapter_title": e.citation.chapter_title,
+            "section_kind": e.citation.section_kind,
+        }
+
+    @staticmethod
+    def _span_payload(spans):
+        return [{key: s[key] for key in ("id", "citation_id", "text")} for s in spans]
+
+    @staticmethod
     def _explanation_payload(question: str, previous_questions: list[str], excerpts: list[Excerpt]):
         if not excerpts:
             raise ModelUnavailable("Explanation requires source excerpts")
         return {
             "question": question,
             "previous_questions": previous_questions,
-            "excerpts": [excerpt.model_dump() for excerpt in excerpts],
+            "excerpts": [
+                {
+                    "id": e.id,
+                    "text": e.text,
+                    "chapter_title": e.citation.chapter_title,
+                    "section_kind": e.citation.section_kind,
+                }
+                for e in excerpts
+            ],
+            **response_context(question),
         }
 
     def explain(
-        self, question: str, previous_questions: list[str], excerpts: list[Excerpt]
+        self,
+        question: str,
+        previous_questions: list[str],
+        excerpts: list[Excerpt],
+        *,
+        requirements: list[str] | None = None,
+        requirement_evidence: list[dict] | None = None,
     ) -> Explanation:
         payload = self._explanation_payload(question, previous_questions, excerpts)
+        if requirements is not None:
+            payload["requirements"] = requirements
+        if requirement_evidence is not None:
+            payload["requirement_evidence"] = requirement_evidence
         schema = Explanation.model_json_schema()
         schema["$defs"]["GroundedStatement"]["properties"]["citation_ids"]["items"] = {
             "type": "string",
@@ -178,7 +862,7 @@ class _EvidenceGateway:
 
 
 class OllamaGateway(_EvidenceGateway):
-    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+    def __init__(self, settings: CoreSettings, client: httpx.Client | None = None):
         self.settings = settings
         self.client = client or httpx.Client(
             base_url=settings.ollama_base_url.rstrip("/"),
@@ -279,7 +963,25 @@ class OllamaGateway(_EvidenceGateway):
                 "options": {
                     "temperature": 0,
                     "num_ctx": 32768,
-                    "num_predict": 4096 if model is Explanation else 700,
+                    "num_predict": (
+                        4096
+                        if issubclass(model, EvidenceDecisionEnvelopeBase)
+                        or model
+                        in {
+                            Explanation,
+                            RequestPlan,
+                            RoutePlan,
+                            AnswerReview,
+                            SpanAnswerReview,
+                            UnitRoutes,
+                            EvidenceBrief,
+                        }
+                        else 2048
+                        if issubclass(model, QuestionPlan)
+                        or issubclass(model, EvidenceDecisionEnvelopeBase)
+                        or model in {CompleteSelection, CompleteVerification}
+                        else 700
+                    ),
                 },
             },
         )
@@ -292,7 +994,8 @@ class OllamaGateway(_EvidenceGateway):
             return _validate_structured(content, model)
         except (ValidationError, KeyError, TypeError, ValueError):
             raise ModelUnavailable(
-                "Model returned an invalid structured evidence response"
+                "Model returned an invalid structured evidence response",
+                code="structured_response_invalid",
             ) from None
 
     def close(self) -> None:
@@ -302,7 +1005,7 @@ class OllamaGateway(_EvidenceGateway):
 class OpenAICompatibleGateway(_EvidenceGateway):
     """Explicit Chat Completions/embeddings contract; no provider guessing or fallback."""
 
-    def __init__(self, settings: Settings, client: httpx.Client | None = None):
+    def __init__(self, settings: CoreSettings, client: httpx.Client | None = None):
         self.settings = settings
         self.client = client or httpx.Client(
             timeout=settings.model_timeout_seconds,
@@ -353,24 +1056,71 @@ class OpenAICompatibleGateway(_EvidenceGateway):
 
     def _request(self, path: str, payload: dict) -> dict:
         self._require_config()
-        try:
-            # An absolute URL preserves prefixes such as /v1 even when a test client has a base_url.
-            response = self.client.post(
-                self.settings.api_base_url.rstrip("/") + "/" + path,
-                headers={"Authorization": "Bearer " + self.settings.api_key.get_secret_value()},
-                json=payload,
-                follow_redirects=False,
+        deadline = time.monotonic() + self.settings.model_timeout_seconds
+        transient = (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadError,
+            httpx.ReadTimeout,
+            httpx.WriteError,
+            httpx.RemoteProtocolError,
+        )
+        for attempt in range(self.settings.api_max_retries + 1):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # Recheck after backoff too: a suspended/paused host must not start
+                # another billable attempt merely because it was eligible earlier.
+                raise ModelUnavailable(
+                    "Model service unavailable or returned an invalid response",
+                    code="provider_timeout",
+                ) from None
+            code, status, retryable = None, None, False
+            try:
+                response = self.client.post(
+                    self.settings.api_base_url.rstrip("/") + "/" + path,
+                    headers={"Authorization": "Bearer " + self.settings.api_key.get_secret_value()},
+                    json=payload,
+                    follow_redirects=False,
+                    timeout=remaining,
+                )
+                response.raise_for_status()
+                result = response.json()
+                if not isinstance(result, dict):
+                    raise ValueError("Expected JSON object")
+                provider_attempt(payload.get("model", ""), path, attempt + 1, "success")
+                provider_usage(result, payload.get("model", ""), path)
+                return result
+            except httpx.HTTPStatusError as error:
+                code, status = "provider_http_error", error.response.status_code
+                # Authentication, rate limits, schemas and all other HTTP errors remain
+                # explicit failures. This fix retries only transient transport failures.
+            except httpx.TimeoutException as error:
+                code, retryable = "provider_timeout", isinstance(error, transient)
+            except (httpx.HTTPError, httpx.InvalidURL) as error:
+                code, retryable = "provider_transport_error", isinstance(error, transient)
+            except (ValueError, KeyError):
+                code = "provider_invalid_response"
+            delay = self.settings.api_retry_backoff_seconds * (2**attempt)
+            retry = (
+                retryable
+                and attempt < self.settings.api_max_retries
+                and deadline - time.monotonic() > delay + 0.001
             )
-            response.raise_for_status()
-            result = response.json()
-            if not isinstance(result, dict):
-                raise ValueError("Expected JSON object")
-            provider_usage(result, payload.get("model", ""), path)
-            return result
-        except (httpx.HTTPError, httpx.InvalidURL, ValueError, KeyError):
-            raise ModelUnavailable(
-                "Model service unavailable or returned an invalid response"
-            ) from None
+            provider_attempt(
+                payload.get("model", ""),
+                path,
+                attempt + 1,
+                code,
+                provider_status=status,
+                will_retry=retry,
+            )
+            if not retry:
+                raise ModelUnavailable(
+                    "Model service unavailable or returned an invalid response",
+                    code=code,
+                    provider_status=status,
+                ) from None
+            time.sleep(delay)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         self._require_config(embeddings=True)
@@ -455,7 +1205,8 @@ class OpenAICompatibleGateway(_EvidenceGateway):
             return _validate_structured(content, model)
         except (ValidationError, KeyError, TypeError, ValueError, AttributeError):
             raise ModelUnavailable(
-                "Model returned an invalid structured evidence response"
+                "Model returned an invalid structured evidence response",
+                code="structured_response_invalid",
             ) from None
 
     def close(self) -> None:
@@ -521,7 +1272,7 @@ class LiteralGateway:
         pass
 
 
-def create_gateway(settings: Settings) -> ModelGateway:
+def create_gateway(settings: CoreSettings) -> ModelGateway:
     if settings.model_backend == "ollama":
         return OllamaGateway(settings)
     if settings.model_backend == "openai_compatible":

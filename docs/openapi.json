@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "HRLearnium Course Assistant API",
-    "description": "Authenticated course Q&A with cited evidence. Natural questions can return a natural grounded explanation (default) or verbatim excerpts (response_mode). Social replies are labelled conversation and contain no course evidence. An LLM backend is required for natural-language answerability and explanations. Configured backend: openai_compatible. ",
+    "description": "Authenticated course Q&A with cited evidence. Natural questions can return a natural grounded explanation (default) or verbatim excerpts (response_mode). Social replies are labelled conversation and contain no course evidence. Content explanations require an LLM backend. Structural questions can use scoped imported document metadata without inference. Independent questions may return partial answers with per-question evidence and statuses. Independently failed drafts are labelled error, not course refusals; supported siblings remain available. Configured backend: openai_compatible. ",
     "version": "0.3.0"
   },
   "paths": {
@@ -38,6 +38,100 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/courses/{course_id}/retrieval-options": {
+      "get": {
+        "tags": [
+          "query"
+        ],
+        "summary": "Retrieval Options",
+        "operationId": "retrieval_options_v1_courses__course_id__retrieval_options_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Course Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetrievalOptions"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/courses/{course_id}/outline": {
+      "get": {
+        "tags": [
+          "query"
+        ],
+        "summary": "Course Outline",
+        "operationId": "course_outline_v1_courses__course_id__outline_get",
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Course Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CourseOutline"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -379,6 +473,77 @@
   },
   "components": {
     "schemas": {
+      "AnswerPart": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "answered",
+              "refused",
+              "clarification",
+              "error"
+            ],
+            "title": "Status"
+          },
+          "answer_kind": {
+            "type": "string",
+            "enum": [
+              "content",
+              "metadata"
+            ],
+            "title": "Answer Kind",
+            "default": "content"
+          },
+          "answer": {
+            "type": "string",
+            "title": "Answer"
+          },
+          "reason_code": {
+            "type": "string",
+            "title": "Reason Code"
+          },
+          "excerpt_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Excerpt Ids"
+          },
+          "explanation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Explanation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MetadataEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "question",
+          "status",
+          "answer",
+          "reason_code"
+        ],
+        "title": "AnswerPart"
+      },
       "Body_replace_document_v1_courses__course_id__documents__document_id__put": {
         "properties": {
           "file": {
@@ -477,6 +642,47 @@
           "source_sha256"
         ],
         "title": "Citation"
+      },
+      "CourseOutline": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "title": "Course Id"
+          },
+          "provenance": {
+            "type": "string",
+            "const": "imported_document_headings",
+            "title": "Provenance",
+            "default": "imported_document_headings"
+          },
+          "snapshot": {
+            "type": "string",
+            "title": "Snapshot"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/OutlineDocument"
+            },
+            "type": "array",
+            "title": "Documents"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "course_id",
+          "snapshot",
+          "documents",
+          "warnings"
+        ],
+        "title": "CourseOutline"
       },
       "DocumentResponse": {
         "properties": {
@@ -626,6 +832,116 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "MetadataEvidence": {
+        "properties": {
+          "field": {
+            "type": "string",
+            "title": "Field"
+          },
+          "chapter_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Chapter Number"
+          },
+          "language": {
+            "type": "string",
+            "enum": [
+              "fa",
+              "en"
+            ],
+            "title": "Language"
+          },
+          "outline": {
+            "$ref": "#/components/schemas/CourseOutline"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "field",
+          "language",
+          "outline"
+        ],
+        "title": "MetadataEvidence"
+      },
+      "OutlineChapter": {
+        "properties": {
+          "number": {
+            "type": "integer",
+            "title": "Number"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "sections": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sections"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "number",
+          "title",
+          "sections"
+        ],
+        "title": "OutlineChapter"
+      },
+      "OutlineDocument": {
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "title": "Document Id"
+          },
+          "version": {
+            "type": "integer",
+            "title": "Version"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "source_sha256": {
+            "type": "string",
+            "title": "Source Sha256"
+          },
+          "chapters": {
+            "items": {
+              "$ref": "#/components/schemas/OutlineChapter"
+            },
+            "type": "array",
+            "title": "Chapters"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "document_id",
+          "version",
+          "title",
+          "source_sha256",
+          "chapters",
+          "warnings"
+        ],
+        "title": "OutlineDocument"
+      },
       "QueryRequest": {
         "properties": {
           "question": {
@@ -643,6 +959,23 @@
             "title": "Response Mode",
             "description": "Both modes accept natural questions. Verbatim returns exact source excerpts; explained (default) returns a natural cited answer; exact evidence remains in excerpts.",
             "default": "explained"
+          },
+          "retrieval_mode": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "full_context",
+                  "hybrid",
+                  "hybrid_rerank"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retrieval Mode",
+            "description": "Override evidence retrieval for this request only. Omit to use the server default. Hybrid modes require current course embeddings; reranking also needs its runtime/model files."
           },
           "conversation_id": {
             "anyOf": [
@@ -687,9 +1020,11 @@
             "type": "string",
             "enum": [
               "answered",
+              "partial",
               "refused",
               "clarification",
-              "conversation"
+              "conversation",
+              "error"
             ],
             "title": "Status"
           },
@@ -744,7 +1079,7 @@
           "policy_version": {
             "type": "string",
             "title": "Policy Version",
-            "default": "grounded-course-v3"
+            "default": "grounded-course-v10"
           },
           "evaluation": {
             "anyOf": [
@@ -757,6 +1092,34 @@
               }
             ],
             "title": "Evaluation"
+          },
+          "answer_kind": {
+            "type": "string",
+            "enum": [
+              "content",
+              "metadata",
+              "multi"
+            ],
+            "title": "Answer Kind",
+            "default": "content"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MetadataEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parts": {
+            "items": {
+              "$ref": "#/components/schemas/AnswerPart"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "title": "Parts"
           }
         },
         "additionalProperties": false,
@@ -771,6 +1134,93 @@
           "retrieval_mode"
         ],
         "title": "QueryResponse"
+      },
+      "RetrievalOption": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "full_context",
+              "hybrid",
+              "hybrid_rerank"
+            ],
+            "title": "Mode"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reasons"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Warnings"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "mode",
+          "available"
+        ],
+        "title": "RetrievalOption"
+      },
+      "RetrievalOptions": {
+        "properties": {
+          "default_mode": {
+            "type": "string",
+            "enum": [
+              "lexical",
+              "full_context",
+              "hybrid",
+              "hybrid_rerank"
+            ],
+            "title": "Default Mode"
+          },
+          "check": {
+            "type": "string",
+            "const": "prerequisites_only",
+            "title": "Check",
+            "default": "prerequisites_only"
+          },
+          "provider_verified": {
+            "type": "boolean",
+            "title": "Provider Verified",
+            "default": false
+          },
+          "passage_count": {
+            "type": "integer",
+            "title": "Passage Count"
+          },
+          "embedded_passage_count": {
+            "type": "integer",
+            "title": "Embedded Passage Count"
+          },
+          "modes": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalOption"
+            },
+            "type": "array",
+            "title": "Modes"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "default_mode",
+          "passage_count",
+          "embedded_passage_count",
+          "modes"
+        ],
+        "title": "RetrievalOptions"
       },
       "ValidationError": {
         "properties": {

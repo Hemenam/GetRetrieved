@@ -78,6 +78,32 @@ def filter_relevance(
     ]
 
 
+def fuse_query_candidates(rankings: list[list[Candidate]]) -> list[Candidate]:
+    """Fuse bounded query variants, deduplicating by authorized passage ID.
+
+    Preserve original source objects; translations/subquestions never become evidence.
+    Raw maxima are for admission only. Fused rank is still not answer confidence.
+    """
+    if len(rankings) == 1:
+        return rankings[0]
+    passages, lexical, semantic = {}, {}, {}
+    scores: Counter[str] = Counter()
+    for ranking in rankings:
+        for position, candidate in enumerate(ranking, start=1):
+            identifier = candidate.passage.id
+            if identifier in passages and passages[identifier] != candidate.passage:
+                raise ValueError("Query variants disagree on source passage identity")
+            passages[identifier] = candidate.passage
+            lexical[identifier] = max(lexical.get(identifier, 0), candidate.lexical_score)
+            if candidate.semantic_score is not None:
+                semantic[identifier] = max(semantic.get(identifier, -1), candidate.semantic_score)
+            scores[identifier] += 1 / (60 + position)
+    return [
+        Candidate(passages[id_], lexical[id_], semantic.get(id_), scores[id_])
+        for id_ in sorted(scores, key=lambda id_: (-scores[id_], id_))
+    ]
+
+
 def retrieve(
     question: str,
     passages: list[SearchPassage],

@@ -53,6 +53,7 @@ def report(mode="full_context"):
                         "embedding_model": "same-embedding",
                         "pipeline_sha256": "code-hash",
                         "prompt_sha256": "prompt-hash",
+                        "retrieval_mode": mode,
                         "reranker": {"model": "cross-encoder"} if mode == "hybrid_rerank" else None,
                     },
                     "source_corpus_sha256": "source-hash",
@@ -206,6 +207,35 @@ def test_three_retrieval_modes_compare_paired_cases_without_claiming_a_winner(tm
     assert len(comparison["experiments"]) == 3
     assert comparison["status_disagreements"] == 0
     assert comparison["winner"] is None
+
+
+def test_repeated_rerank_runs_cannot_change_reranker_or_setup_configuration(tmp_path):
+    first = write_report(tmp_path, "hybrid_rerank")
+    second = write_report(tmp_path, "hybrid_rerank", "second.json")
+    payload = json.loads(second.read_text(encoding="utf-8"))
+    payload["outcomes"][0]["evaluation"]["configuration"]["reranker"] = {"model": "other"}
+    second.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="same configuration"):
+        compare_reports([first, second])
+    payload["outcomes"][0]["setup_evaluation"] = deepcopy(payload["outcomes"][0]["evaluation"])
+    payload["outcomes"][0]["setup_evaluation"]["configuration"]["chat_model"] = "different"
+    second.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="one configuration"):
+        compare_reports([first, second])
+
+
+def test_language_is_a_required_human_judgment_when_gold_specifies_it(tmp_path):
+    path = write_report(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["outcomes"][0]["gold"]["expected_language"] = "en"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    review = complete_review(path)
+    with pytest.raises(ValueError, match="missing boolean"):
+        score_review(path, review)
+    review["cases"][0]["language_correct"] = False
+    result = score_review(path, review)
+    assert result["semantic_pass"]["rate"] == 0
+    assert result["language_compliance"]["rate"] == 0
 
 
 @pytest.mark.parametrize(

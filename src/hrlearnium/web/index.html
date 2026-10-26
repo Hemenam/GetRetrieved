@@ -39,6 +39,18 @@
 
     <div class="composer-dock">
       <form id="question-form" class="composer">
+        <div class="retrieval-controls">
+          <label for="retrieval-mode">Retrieval mode</label>
+          <select id="retrieval-mode" aria-describedby="retrieval-help" disabled>
+            <option value="">Server default</option>
+            <option value="full_context">Full context</option>
+            <option value="hybrid">Hybrid</option>
+            <option value="hybrid_rerank">Hybrid + reranker</option>
+          </select>
+          <button id="refresh-retrieval" class="quiet-button" type="button" disabled>Refresh status</button>
+        </div>
+        <p id="retrieval-help" class="retrieval-help" role="status">Connect a course to check which modes are ready to test.</p>
+        <details id="retrieval-setup" class="retrieval-setup" hidden><summary>Mode setup and checks</summary><ul id="retrieval-status-list"></ul></details>
         <div class="composer-options">
           <fieldset class="mode-picker"><legend class="visually-hidden">Response mode</legend><label><input type="radio" name="response-mode" value="explained" checked><span>Cited explanation</span></label><label><input type="radio" name="response-mode" value="verbatim"><span>Source text</span></label></fieldset>
           <label class="evaluation-toggle"><input id="include-evaluation" type="checkbox"> Test details</label>

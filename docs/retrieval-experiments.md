@@ -1,5 +1,7 @@
 # Evaluation and retrieval experiments
 
+For a bounded multi-mode experiment with repetitions, snapshots, reviews and a cross-document summary, use the new [benchmark runner](benchmark.md). It selects retrieval per request on one server. The single-run commands below remain supported; `--expect-retrieval-mode` checks the server's choice, while `--retrieval-mode` actively selects it. Server restarts below apply only when changing server-side configuration.
+
 Three experiments share the existing answering prompts and source passages:
 
 | Mode | Candidate preparation | Default selector input |

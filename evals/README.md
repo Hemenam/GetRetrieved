@@ -1,5 +1,23 @@
 # Persian course evaluation set
 
+## Natural student benchmark (new proposed references)
+
+[V2 metadata/multipart expansion](natural-student-v2/README.md) is the latest proposed
+pack: **188 main cases, including 24 dedicated metadata and 32 multipart cases**, plus
+12 separate assisted diagnostic pairs. [Review the 28 additions](natural-student-v2/additions.md)
+or [the full reference tables](natural-student-v2/review.md). V1 remains unchanged.
+
+[Natural student v1](natural-student-v1/README.md) contains **160 naturally phrased main
+cases plus 12 separate location-assisted diagnostic pairs**, including metadata, follow-ups,
+multipart, language, scope and evidence-boundary cases. Start with its
+[question-and-reference review tables](natural-student-v1/review.md). References were
+checked against the scoped stored source, but require new owner review and approval.
+No paid benchmark was run to prepare it; previous datasets and approvals are unchanged.
+
+For the 20-case, three-mode pilot and multi-document runner, start with the [benchmark guide](../docs/benchmark.md). The pilot's 20 expectations were approved by the project owner; its default command only plans requests offline. The original datasets below are unchanged.
+
+The separate [chapter coverage expansion](chapter-coverage-v1/README.md) adds **44 proposed single-focus cases**, one for each introduction, explanation, example and exercise across all 11 chapters. Start with its [Persian review sheet](chapter-coverage-v1/review.md). These new labels are not covered by the pilot approval. Multi-question queries are deferred, the existing pilot and results are preserved, and no paid execution is authorized by creating this draft.
+
 For instructor fact annotations, semantic grading, future courses, and controlled full-context / hybrid / hybrid-rerank comparisons, follow [the experiment guide](../docs/retrieval-experiments.md). The original proposed cases remain available as a development baseline.
 
 `course_qa.jsonl` contains **100 proposed instructor-review cases** for the course assistant. Both response modes accept natural-language questions, paraphrases, and the Persian variants already included here. These cases have not been approved by the customer or instructor. They are a reproducible development evaluation, not evidence that the service is ready for unsupervised release. Keep them separate from the retrieval corpus.
@@ -78,6 +96,50 @@ Report counts and denominators as well as percentages, overall and by category. 
 **Exact provenance does not establish relevance.** For example, the source genuinely says `10:30` in a hypothetical scenario. Returning that quote as today's company update time is a false answer even though its text and citation are authentic. Similarly, a quotation from a bad-manager example must keep its "wrong example" context, and a course's example of a burnout signal is not a diagnosis of the user's colleague. Review the answer as the learner will see it, including section labels and citations. Case notes capture these distinctions; substring checks alone cannot judge all of them.
 
 ## Instructor review and release use
+
+### V6 metadata and independent-question extension (2026-10-20)
+
+**Current implementation is [policy v7](../docs/request-planning-v7.md), implemented
+2026-10-21 and offline-tested. No paid v7 benchmark has been run.** The completed v6
+results linked below remain historical. Use a fresh labeled run after explicit approval;
+do not resume/overwrite v6 captures or describe these results as testing the new planner.
+
+The explicitly requested multipart rerun completed **18/18 requests** without outer
+HTTP errors/timeouts. [Fresh six-case comparison, full answers, assistant scores and costs](results/multipart-v6-review-20261020/multipart-comparison.md)
+and the [updated 56-question catalog](results/multipart-v6-review-20261020/benchmark-56-questions.md)
+are available. The latter combines historical v5, earlier v6 metadata, and fresh
+multipart attempts; it is not a clean full-catalog v6 experiment. Original failures
+remain unchanged. The repeat used a dedicated four-thread CPU worker and a
+1,200-second client timeout; production configuration/prompts were not modified.
+See the report for language, planning and metadata-routing defects still present.
+
+`scripts/rerun_multipart_v6.py` defaults to an offline plan; its explicitly authorized
+execution requires a new output directory and exact 18-query cap. It does not resume
+or overwrite prior results. `scripts/report_multipart_rerun.py` formats saved captures
+and explicit assistant judgments offline. The dedicated rerun server was stopped.
+
+The [12 new source-audited references](metadata-multipart-v6/references.md) extend the
+44-question historical catalog to 56 questions. They test document structure, missing
+administrative metadata, independent question bundles, and partial supported/unsupported
+responses. These new references are assistant-reviewed, not independently owner-approved.
+
+[Current 56-question comparison and assistant review](results/metadata-multipart-v6-interim-20261020/benchmark-review.md)
+is **incomplete**: 19 actual v6 responses were collected, not all 36 mode/case pairs.
+The original local HTTP 429 and subsequent reranked-query timeout remain recorded.
+The report keeps historical v5 results separate and marks every unattempted answer.
+Do not treat it as a clean full-catalog v6 run or an architecture ranking.
+
+`scripts/prepare_extension_v6.py` creates the references offline;
+`scripts/run_extension_v6.py` defaults to an offline plan. Execution requires an
+explicit query cap and new output directory. `scripts/recover_extension_v6.py` only
+covers the explicitly scoped original local-429 recovery, never semantic retries;
+it is **not** suitable for recovering the later ambiguous timeout. The interim
+report is generated offline by `scripts/report_extension_interim.py` using explicit
+assistant judgments bound to the two collection ledgers.
+
+The dedicated benchmark server on port 8002 was stopped after the timeout; normal
+application servers were not changed. Additional paid collection needs a deliberate
+timeout/performance decision and a separately labeled run; do not replay the original.
 
 Have the instructor confirm each expected status, chapter, and quote anchor, especially the handling of practical advice already present in the course, examples, and clarification. Any changes should be reviewed against the original source and versioned with the evaluation file. Do not mark these cases as instructor-approved until that review happens.
 

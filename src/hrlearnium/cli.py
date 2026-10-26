@@ -6,10 +6,9 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-import jwt
 import uvicorn
 
-from hrlearnium.config import Settings
+from hrlearnium.core_config import CoreSettings
 from hrlearnium.ingestion import IngestionError, parse_docx
 from hrlearnium.models import ModelUnavailable, create_gateway
 from hrlearnium.schemas import Principal
@@ -34,6 +33,10 @@ def parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--reload", action="store_true")
+    local_chat = commands.add_parser("dev-chat", help="Token-free local testing UI; loopback only")
+    local_chat.add_argument("--tenant", required=True)
+    local_chat.add_argument("--course", required=True)
+    local_chat.add_argument("--port", type=int, default=8000)
     for name in ("ingest", "reindex", "verify-source", "token"):
         command = commands.add_parser(name)
         command.add_argument("--tenant", required=True)
@@ -104,7 +107,19 @@ def main() -> int:
                 }
             )
             return 0
-        settings = Settings()
+        if args.command == "dev-chat":
+            from hrlearnium.adapters.local_chat import create_local_chat_app
+
+            app = create_local_chat_app(tenant=args.tenant, course=args.course, port=args.port)
+            print(f"Local-only course testing at http://127.0.0.1:{args.port}/chat (no JWT).")
+            uvicorn.run(app, host="127.0.0.1", port=args.port, proxy_headers=False)
+            return 0
+        if args.command in {"serve", "token", "export-openapi"}:
+            from hrlearnium.adapters.standalone import StandaloneSettings
+
+            settings = StandaloneSettings()
+        else:
+            settings = CoreSettings()
         if args.command == "serve":
             uvicorn.run(
                 "hrlearnium.main:create_app",
@@ -132,6 +147,8 @@ def main() -> int:
             scopes=["query", "content:read", "content:write"],
         )
         if args.command == "token":
+            import jwt
+
             if not 1 <= args.ttl <= settings.max_token_lifetime_seconds:
                 raise ValueError(
                     f"Token TTL must be between 1 and {settings.max_token_lifetime_seconds} seconds"

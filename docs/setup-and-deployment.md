@@ -1,5 +1,8 @@
 # Setup and deployment
 
+For integration into the main LMS, use [the token-free component entry points](lms-component.md).
+The standalone server/JWT/testing UI instructions below are retained for development and legacy use.
+
 > This guide covers local Ollama setup, diagnostic literal lookup, and deployment. For hosted model API keys and provider configuration, follow [the main README](../README.md). Run all commands from the project root.
 
 A standalone FastAPI backend for an LMS chatbot with **natural cited answers by default**, exact source evidence available separately, and an optional verbatim source-text mode. Django can call it over an authenticated HTTP API, or use the built-in `/chat` testing page. Configure a local Ollama backend or a compatible hosted model API for natural-language questions.
@@ -108,7 +111,16 @@ request_id, status, answer, excerpts[], conversation_id,
 reason_code, retrieval_mode, response_mode, explanation, policy_version
 ```
 
-`status` is `answered`, `refused`, `clarification`, or `conversation`. For an answered `verbatim` response, `answer` equals `"\n\n".join(excerpt.text for excerpt in excerpts)` exactly and `explanation` is `null`. For an answered `explained` response, `answer` contains only generated statements with numbered citations, separated by blank lines. `explanation.statements` contains each statement's `text` and `citation_ids`, which must resolve to included excerpt IDs. Exact source text remains in `excerpts`. The returned `response_mode` matches the request. Nonanswered statuses contain neither excerpts nor explanations.
+`status` is `answered`, `partial`, `refused`, `clarification`, or `conversation`. Check
+`answer_kind` before rendering. A single `content` answer in `verbatim` mode equals
+`"\n\n".join(excerpt.text for excerpt in excerpts)` exactly, with `explanation: null`.
+An explained content answer uses generated statements and numbered citations. A `metadata`
+answer uses scoped document-outline provenance, without passage excerpts or an LLM explanation.
+A `multi` answer has numbered `parts[]` with their own statuses and evidence; a `partial` result
+contains both supported and unsupported/ambiguous parts. Its explanations live inside the parts,
+not at the root. The [v6 response contract and limits](metadata-and-multipart-v6.md) are retained
+in [v7 typed planning and language preservation](request-planning-v7.md). The returned
+`response_mode` matches the request. Refused parts have no excerpts or explanations.
 
 Each excerpt has its immutable ID, original text, and citation including document ID/version/title, chapter number/title, section type, paragraph range, source offsets, and source checksum. Citation labels are metadata, not additions to the course quotation. Keep explanation text visually separate from quotations; see the complete rendering contract in [Django integration](django-integration.md).
 

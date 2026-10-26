@@ -1,4 +1,6 @@
-"""Server-to-server LMS connector. Keep the signing secret on the Django server.
+"""Legacy standalone HTTP/JWT connector. Prefer examples/lms_component.py for embedding.
+
+Keep the signing secret on the Django server when retaining this optional adapter.
 
 This module has no Django dependency; copy it into your Django service layer.
 The caller must authorize enrollment and tenant membership before calling it.

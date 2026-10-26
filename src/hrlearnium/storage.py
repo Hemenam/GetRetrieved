@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from hrlearnium.ingestion import ParsedDocument
 from hrlearnium.retrieval import SearchPassage
-from hrlearnium.schemas import Citation, DocumentResponse, Excerpt
+from hrlearnium.schemas import Citation, CourseOutline, DocumentResponse, Excerpt
 
 
 class StorageConflict(Exception):
@@ -280,6 +280,66 @@ class Storage:
                 )
                 for row in rows
             ], {row["embedding_model"] for row in rows}
+
+    def course_outline(self, tenant: str, course: str) -> CourseOutline:
+        """Complete current scoped structure, never a top-k retrieval or inferred LMS manifest."""
+        with self.connection() as db:
+            rows = db.execute(
+                """SELECT d.id,d.version,r.title,r.source_sha256,r.warnings,
+                          p.chapter_number,p.chapter_title,p.section_kind,p.source_start
+                   FROM documents d JOIN revisions r ON r.document_id=d.id AND r.version=d.version
+                   LEFT JOIN passages p ON p.document_id=d.id AND p.version=d.version
+                   WHERE d.tenant_id=? AND d.course_id=? AND d.active=1
+                   ORDER BY d.created_at,d.id,p.source_start""",
+                (tenant, course),
+            ).fetchall()
+        documents = {}
+        for row in rows:
+            doc = documents.setdefault(
+                row["id"],
+                {
+                    "document_id": row["id"],
+                    "version": row["version"],
+                    "title": row["title"],
+                    "source_sha256": row["source_sha256"],
+                    "chapters": {},
+                    "warnings": json.loads(row["warnings"]),
+                },
+            )
+            number = row["chapter_number"]
+            if number is None:
+                continue
+            chapter = doc["chapters"].setdefault(
+                number,
+                {
+                    "number": number,
+                    "title": row["chapter_title"],
+                    "sections": [],
+                },
+            )
+            if chapter["title"] != row["chapter_title"]:
+                warning = f"Conflicting titles for chapter {number}; verify the imported structure."
+                if warning not in doc["warnings"]:
+                    doc["warnings"].append(warning)
+            if row["section_kind"] not in chapter["sections"]:
+                chapter["sections"].append(row["section_kind"])
+        values = []
+        for doc in documents.values():
+            doc["chapters"] = list(doc["chapters"].values())
+            values.append(doc)
+        warnings = [
+            "Structure is derived from imported document headings, not an authoritative LMS syllabus."
+        ]
+        if len(values) > 1:
+            warnings.append(
+                "Multiple documents: chapter numbers are document-local; no unified course total is assumed."
+            )
+        fingerprint = hashlib.sha256(
+            json.dumps(values, ensure_ascii=False, sort_keys=True).encode()
+        ).hexdigest()
+        return CourseOutline(
+            course_id=course, snapshot=fingerprint, documents=values, warnings=warnings
+        )
 
     def get_excerpts(
         self, tenant: str, course: str, ids: list[str], *, current_only: bool = False

@@ -106,12 +106,13 @@ def test_unsupported_explanation_is_withheld_and_question_not_saved(api_factory)
     client, _, gateway = api_factory(retrieval_mode="full_context")
     upload(client)
     install_explainer(gateway)
+    conversation = ask_mode(client, "explained", question="سلام").json()["conversation_id"]
     gateway.verify_explanation = lambda *args: False
-    rejected = ask_mode(client, "explained").json()
-    assert rejected["status"] == "refused"
-    assert rejected["explanation"] is None
-    assert rejected["excerpts"] == []
-    ask_mode(client, conversation_id=rejected["conversation_id"])
+    rejected = ask_mode(client, "explained", conversation_id=conversation)
+    assert rejected.status_code == 503
+    assert "not a course refusal" in rejected.json()["detail"]
+    assert "explanation" not in rejected.json() and "excerpts" not in rejected.json()
+    ask_mode(client, conversation_id=conversation)
     assert gateway.selections[-1][1] == []
 
 

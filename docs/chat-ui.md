@@ -1,12 +1,42 @@
 # Browser chat for pipeline testing
 
+This is a development testing page, not the LMS student interface. Use `dev-chat`
+for token-free loopback testing; `serve` retains the older JWT connection workflow.
+[Token-free LMS integration](lms-component.md) uses the host's authentication and
+does not mount this development screen.
+
 The UI is deliberately small: static HTML, CSS and a JavaScript module served by FastAPI.
 It talks to the same `/v1/courses/{course_id}/query` endpoint as the CLI and Django connector.
 There is no separate frontend server, framework build, database, model or retrieval pipeline.
 Document import, model choice, storage and chunking are unchanged. The shared backend now has
 [relevance gates and natural answers](relevance-gating.md); the UI does not implement separate RAG logic.
 
+Policy v6 also displays [course metadata and independent-question results](metadata-and-multipart-v6.md).
+The current backend uses [v7 typed planning and language preservation](request-planning-v7.md)
+with the same UI response contract; no separate browser-side classifier is used.
+Partial responses show an individual status for every question. Metadata source details are distinct
+from passage citations. Restart the backend and refresh this page to load the new response contract.
+
 ## Start and connect
+
+For local testing with the existing `.env` and imported course:
+
+```powershell
+.\.venv\Scripts\python.exe -m hrlearnium dev-chat --tenant customer-demo --course captain-storm --port 8000
+```
+
+Open <http://127.0.0.1:8000/chat>. It auto-connects, hides the JWT dialog, and sends
+no Authorization header. Tenant, user, course and query-only permission are fixed
+by the server, not accepted from browser claims. Retrieval controls, conversations,
+citations and exports are unchanged. No signing secret is required.
+
+This launcher cannot bind a public interface and does not trust forwarded client
+headers. The adapter also checks loopback peers, Host, Origin and cross-site fetch
+metadata, and denies document writes/other courses. Any local operator can access
+the selected course: this is **not production authentication**. Model questions
+still use the configured paid provider and require working billing.
+
+### Legacy standalone server (JWT)
 
 From the project folder in PowerShell, with the existing `.env` and imported course:
 
@@ -31,6 +61,28 @@ do not expose the token-generation command or signing secret to students.
 
 ## What to test
 
+For the embedding/reindex and pinned local-model setup, see [real hybrid testing](hybrid-testing.md).
+
+- Choose **Retrieval mode** independently from the answer format: **Full context**, **Hybrid**,
+  **Hybrid + reranker**, or **Server default**. The choice is sent as optional `retrieval_mode`
+  on each query; it never changes `.env` or another user's requests. Every reply displays the
+  actual mode used, and exports include the selected mode. A mismatched explicit mode is an error,
+  not an accepted fallback.
+- Connecting or choosing **Refresh status** calls the authenticated, course-scoped
+  `GET /v1/courses/{course_id}/retrieval-options`. It reports missing embedding configuration,
+  missing/stale course vectors, context limits and reranker dependencies/local model files.
+  These are prerequisite checks, not proof of provider access or inference quality. No embedding
+  generation, reindexing, LLM inference or model downloads happen during this check. Ollama may
+  inspect its model inventory. Unavailable modes can be selected to inspect their requirements,
+  but sending is blocked until setup is complete and status is refreshed.
+- Switching retrieval mode starts a fresh backend conversation for a clean comparison, while
+  keeping earlier results visible. Repeat the same self-contained question in each mode; follow-up
+  references will not carry across a switch. **Cited explanation** remains the default answer format.
+- Hybrid requires an operator-configured embedding model and a course imported/reindexed in hybrid
+  mode. Reranking additionally requires the optional runtime and the configured model's local
+  files (unless the operator explicitly enables downloads). The UI does not install dependencies,
+  download models, or modify/reindex your course. After setup changes, restart the server if needed
+  and use **Refresh status**.
 - Send `سلام` or `Hi`. Expect a short greeting, no course excerpts and no Answered badge.
   Greetings do not replace the recent answered questions used to resolve follow-ups.
 - Ask a supported question and open its citations. Explained mode displays the structured
@@ -102,6 +154,9 @@ For an optional synthetic browser smoke test, run:
 
 This **test-only** server binds to `127.0.0.1:8001`, uses a temporary database and deterministic fake
 model, and prints a test token for `course-1`. Open `/chat` on port 8001 and use that course/token.
+Synthetic embeddings and a fake reranker let you exercise all three retrieval choices without
+model calls. The same test token also permits `course-unindexed`, which has no embeddings and
+exercises the missing-setup state. Neither course exists in the real course database.
 `unsupported` gives a refusal and `service-error` gives an operational error. It never loads `.env`,
 calls a provider, or modifies the real course database. Stop it with Ctrl+C when finished.
 These checks validate integration, not the real model's semantic quality.

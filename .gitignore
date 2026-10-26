@@ -13,6 +13,16 @@ __pycache__/
 .coverage
 htmlcov/
 evals/results/
+evals/reviews/
+evals/pilot/
+evals/chapter-coverage-v1/
+evals/metadata-multipart-v6/
+evals/natural-student-v1/
+evals/natural-student-v2/
+# Historical local generator embeds private course quotation references.
+/scripts/prepare_extension_v6.py
+*.docx
+*.pdf
 build/
 dist/
 

@@ -316,6 +316,26 @@ def test_expected_retrieval_mode_detects_server_not_restarted(mock_api):
     assert outcomes[0]["error"]["kind"] == "protocol"
 
 
+@pytest.mark.parametrize("mode", ["full_context", "hybrid", "hybrid_rerank"])
+def test_per_request_retrieval_mode_reaches_setup_and_main(mock_api, mode):
+    payload = response("explained") | {"retrieval_mode": mode}
+    calls = mock_api(payload)
+    args = arguments("explained")
+    args.retrieval_mode = mode
+    outcomes, _ = runner.api_evaluation([CASE | {"previous_question": "Setup question?"}], args)
+    assert outcomes[0]["evaluation_status"] == "evaluated"
+    assert [c[2]["retrieval_mode"] for c in calls if c[0] == "POST"] == [mode, mode]
+
+
+def test_wrong_setup_retrieval_mode_stops_before_main_turn(mock_api):
+    calls = mock_api(response("explained"))
+    args = arguments("explained")
+    args.retrieval_mode = "full_context"
+    outcomes, _ = runner.api_evaluation([CASE | {"previous_question": "Setup?"}], args)
+    assert outcomes[0]["error"]["stage"] == "setup"
+    assert len(calls) == 1
+
+
 def test_annotated_case_approval_requires_meaningful_facts_and_reviewer(tmp_path):
     path = tmp_path / "gold.jsonl"
     case = CASE | {"review_status": "approved", "reviewer": "teacher", "required_facts": []}

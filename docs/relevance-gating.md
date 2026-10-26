@@ -1,6 +1,14 @@
 # Relevance gates and natural answers
 
-Policy version `grounded-course-v3` separates **search relevance**, **answerability** and
+Current request orchestration is [policy v7](request-planning-v7.md): typed intent/groups
+and request-scoped answer language. The retrieval/evidence path described here remains.
+
+This document describes the v4/v5 content path. In v6, [metadata routing and independent-question
+execution](metadata-and-multipart-v6.md) wrap that path. Whole-question completeness checks still
+apply within a dependent question, but one unsupported independent question no longer suppresses
+supported siblings.
+
+Policy version `grounded-course-v4` separates **search relevance**, **answerability** and
 **answer writing**. A passage scoring well in search does not necessarily contain the answer.
 The database, imported source text and chunking strategy are unchanged.
 
@@ -10,20 +18,26 @@ The database, imported source text and chunking strategy are unchanged.
 2. Recognize a narrow set of whole-message greetings, thanks and help requests. Reply briefly
    without retrieval, an LLM call or citations. Do not add social turns to the answered-question
    history. A greeting plus a substantive question is not swallowed by this shortcut.
-3. Collect evidence using the selected retrieval mode:
+3. Plan every requested part in a bounded structured call. For English hybrid questions, also
+   generate a Persian search translation unless `HR_TRANSLATE_SEARCH_QUERIES=false`. Search
+   translations and requirements are untrusted hints, never factual evidence. Fuse original,
+   translated and component-query rankings without changing source text or requested answer language.
+   Collect evidence using the selected retrieval mode:
    - `full_context`: provide all authorized current passages within the context-size limit.
      There is no retriever score in this mode. The LLM must select only passages that answer
      the actual question, or refuse/ask for clarification.
    - `hybrid`: rank using BM25 and embedding cosine similarity with reciprocal-rank fusion
      (RRF), apply the raw-score floors below, then take the top eligible candidates.
-   - `hybrid_rerank`: apply the same search floors, build the larger reranking pool, then
+   - `hybrid_rerank`: keep a bounded pool of positive ranked matches without the embedding floor, then
      optionally filter by a minimum raw cross-encoder score before taking its top candidates.
 4. If filtering leaves no evidence, return an insufficient-evidence refusal without asking
    the answer writer to fill the gap. Otherwise the LLM evidence selector checks semantic
-   answerability: topical overlap or a high search score alone is not enough.
+   answerability: topical overlap or a high search score alone is not enough. The selector must map
+   source IDs to every requested part; missing part coverage refuses the whole question.
 5. Validate selected IDs, course authorization, active source revisions and exact source spans.
 6. In the default `explained` mode, the LLM writes a direct, natural answer using those excerpts.
-   Every statement cites evidence. A separate LLM call checks responsiveness and grounding;
+   Every statement cites evidence. A separate LLM call checks responsiveness, grounding, whether
+   the plan missed any original request, and statement coverage for each requirement;
    unsupported output is withheld, not replaced with raw chunks.
 7. Return generated statements with citation markers as `answer`, and exact quotations separately
    in `excerpts`. The chat UI opens evidence on demand. Explicit `verbatim`/Source text still
@@ -40,12 +54,13 @@ a mathematical guarantee of correctness.
 Add or change these settings in the server's `.env`, then restart the server:
 
 ```dotenv
-HR_RETRIEVAL_MIN_COSINE=0.30
+HR_RETRIEVAL_MIN_COSINE=0.24
 HR_RETRIEVAL_MIN_BM25=1.0
+HR_TRANSLATE_SEARCH_QUERIES=true
 ```
 
 These are **provisional defaults, not calibrated confidence thresholds**. A hybrid candidate
-is eligible when its positive cosine score meets the cosine floor **OR** its positive BM25
+in plain hybrid is eligible when its positive cosine score meets the cosine floor **OR** its positive BM25
 score meets the BM25 floor. The OR rule preserves exact-name/term matches that embeddings
 might miss, and semantic matches with different wording. The LLM still checks the surviving
 evidence against the question. Zero-score candidates are excluded even if the floors are zero.
@@ -76,7 +91,8 @@ model and reindexing; thresholds do not create embeddings or enable that mode au
 4. Repeat after changing the embedding model, reranker, course or chunking. Store model identities,
    settings, source hashes and application revision with each report.
 
-Enable **Test details** in chat to inspect `configuration.relevance_thresholds`, raw
+Enable **Test details** in chat to inspect `question_plan`, `requirement_selection`,
+`requirement_verification`, `configuration.relevance_thresholds`, raw
 `retrieved_candidates`, the `relevance_filter` before/after counts, `eligible_candidates`, and
 the final `selector_candidates`. Sensitive evidence stays behind the existing authenticated API.
 

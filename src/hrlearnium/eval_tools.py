@@ -19,6 +19,8 @@ GOLD_FIELDS = {
     "reviewer",
     "split",
     "scope_notes",
+    "expected_language",
+    "question_family_id",
 }
 
 
@@ -36,6 +38,14 @@ def validate_annotations(case: dict) -> bool:
         or case.get("split", "development") not in {"development", "held_out"}
         or not isinstance(case.get("reviewer", ""), str)
         or not isinstance(case.get("scope_notes", ""), str)
+        or ("expected_language" in case and case["expected_language"] not in ("fa", "en"))
+        or (
+            "question_family_id" in case
+            and (
+                not isinstance(case["question_family_id"], str)
+                or not case["question_family_id"].strip()
+            )
+        )
         or not isinstance(facts, list)
         or not isinstance(case.get("forbidden_claims", []), list)
         or any(
@@ -134,6 +144,11 @@ def review_template(report_path: Path) -> dict:
                 "answer_relevant": None,
                 "answer_complete": None,
                 "example_context_preserved": None,
+                **(
+                    {"language_correct": None}
+                    if item.get("gold", {}).get("expected_language")
+                    else {}
+                ),
                 "fact_checks": [
                     {"id": fact["id"], "covered": None}
                     for fact in item.get("gold", {}).get("required_facts", [])
@@ -158,7 +173,10 @@ def review_template(report_path: Path) -> dict:
             "Review against the original course and each statement's cited excerpts. "
             "Fill boolean judgments and mark reviewed=true. A blank judgment is not a pass. "
             "Required facts must describe meaning, rather than merely repeat quote anchors. "
-            "For a non-answer, only status_correct is required. Do not edit captured responses."
+            "In explained mode, related passage dumps that never directly answer the question "
+            "fail relevance even if their citations are authentic. "
+            "For a non-answer, status_correct is required. When expected_language is set, "
+            "language_correct is also required for every status. Do not edit captured responses."
         ),
         "cases": cases,
     }
@@ -191,6 +209,8 @@ def score_review(report_path: Path, review: dict) -> dict:
             continue
         answered = case["response"]["status"] == "answered"
         judgments = ["status_correct"]
+        if original["gold"].get("expected_language"):
+            judgments.append("language_correct")
         if answered:
             judgments += ["answer_relevant", "answer_complete", "example_context_preserved"]
         if any(type(case.get(key)) is not bool for key in judgments):
@@ -241,6 +261,10 @@ def score_review(report_path: Path, review: dict) -> dict:
         "status_correctness": ratio(sum(c["status_correct"] for c in reviewed), len(reviewed)),
         "answer_relevance": ratio(sum(c["answer_relevant"] for c in answers), len(answers)),
         "answer_completeness": ratio(sum(c["answer_complete"] for c in answers), len(answers)),
+        "language_compliance": ratio(
+            sum(c.get("language_correct") is True for c in reviewed if "language_correct" in c),
+            sum("language_correct" in c for c in reviewed),
+        ),
         "required_fact_coverage": ratio(sum(f["covered"] is True for f in facts), len(facts)),
         "statement_support": ratio(sum(s["supported"] for s in statements), len(statements)),
         "citation_support": ratio(
@@ -276,6 +300,8 @@ def runtime_summary(outcomes: list[dict], pricing: dict | None = None) -> dict:
             if isinstance(item.get(key), dict):
                 traces.append(item[key])
     calls = [call for trace in traces for call in trace.get("provider_calls", [])]
+    attempts = [attempt for trace in traces for attempt in trace.get("provider_attempts", [])]
+    failed_attempts = sum(a["outcome"] != "success" for a in attempts)
     diagnostics_complete = bool(outcomes) and all(
         item.get("evaluation_status") == "evaluated"
         and isinstance(item.get("evaluation"), dict)
@@ -284,6 +310,7 @@ def runtime_summary(outcomes: list[dict], pricing: dict | None = None) -> dict:
         )
         for item in outcomes
     )
+    diagnostics_complete = diagnostics_complete and not failed_attempts
     observed = [call for call in calls if isinstance(call.get("usage"), dict)]
     priced, subtotal = 0, 0.0
     for call in calls:
@@ -311,6 +338,9 @@ def runtime_summary(outcomes: list[dict], pricing: dict | None = None) -> dict:
             for name in sorted({name for t in traces for name in t.get("stages_ms", {})})
         },
         "observed_provider_calls": len(calls),
+        "observed_provider_attempts": len(attempts) if attempts else None,
+        "observed_failed_attempts": failed_attempts if attempts else None,
+        "observed_retries": sum(a["attempt"] > 1 for a in attempts) if attempts else None,
         "calls_with_token_usage": len(observed),
         "reported_token_totals": {
             key: sum(c["usage"][key] for c in observed if key in c["usage"])
@@ -377,6 +407,7 @@ def compare_reports(paths: list[Path]) -> dict:
     experiments, paired = [], []
     baseline_config = None
     baseline_source = None
+    mode_configs = {}
     for path, report in zip(paths, reports, strict=True):
         if (
             report["dataset_sha256"] != baseline["dataset_sha256"]
@@ -387,10 +418,14 @@ def compare_reports(paths: list[Path]) -> dict:
             != base_ids
             or report["metadata"].get("response_mode") != baseline["metadata"].get("response_mode")
             or report["metadata"].get("course") != baseline["metadata"].get("course")
+            or report["metadata"].get("tenant_label") != baseline["metadata"].get("tenant_label")
         ):
             raise ValueError("Compare the same dataset, cases, course and response mode")
         traces = [
-            i["evaluation"] for i in report["outcomes"] if isinstance(i.get("evaluation"), dict)
+            i[key]
+            for i in report["outcomes"]
+            for key in ("setup_evaluation", "evaluation")
+            if isinstance(i.get(key), dict)
         ]
         if not traces:
             raise ValueError("Comparison requires captured runtime diagnostics")
@@ -402,7 +437,11 @@ def compare_reports(paths: list[Path]) -> dict:
             raise ValueError("Each run must use one configuration and one nonempty source corpus")
         config = json.loads(next(iter(configs)))
         # Only retrieval strategy/reranker may vary in this controlled experiment.
-        common = {k: v for k, v in config.items() if k not in {"reranker", "rerank_pool_limit"}}
+        common = {
+            k: v
+            for k, v in config.items()
+            if k not in {"retrieval_mode", "reranker", "rerank_pool_limit"}
+        }
         source = next(iter(sources))
         if baseline_config is None:
             baseline_config, baseline_source = common, source
@@ -413,6 +452,12 @@ def compare_reports(paths: list[Path]) -> dict:
         modes = {i["retrieval_mode"] for i in report["outcomes"] if i.get("retrieval_mode")}
         if len(modes) != 1:
             raise ValueError("Each run must report exactly one retrieval mode")
+        if config.get("retrieval_mode", next(iter(modes))) != next(iter(modes)):
+            raise ValueError("Runtime configuration and reported retrieval mode must agree")
+        mode = next(iter(modes))
+        if mode in mode_configs and config != mode_configs[mode]:
+            raise ValueError("Repeated runs of the same mode must keep the same configuration")
+        mode_configs[mode] = config
         experiments.append(
             {
                 "report": str(path),

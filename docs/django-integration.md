@@ -1,5 +1,11 @@
 # Connecting Django to the FastAPI course assistant
 
+> This is the retained **legacy standalone HTTP/JWT adapter**. For the LMS component
+> with host-owned authentication and no additional learner/service JWT, start with
+> [token-free component integration](lms-component.md) and
+> [the service-layer example](../examples/lms_component.py). The real LMS enrollment
+> mapping must still be wired in its backend; the old connector is not required by the core.
+
 Explained requests can make three sequential chat calls, plus an embedding call in hybrid mode. Set the connector's `timeout_seconds` and reverse proxy timeout to accommodate measured total query latency. `HR_MODEL_TIMEOUT_SECONDS` applies to individual provider HTTP operations, not the whole FastAPI query; the connector's default 120 seconds may need increasing for slower models.
 
 The FastAPI service runs independently of the LMS. Django authorizes the learner,

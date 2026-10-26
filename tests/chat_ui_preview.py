@@ -15,6 +15,18 @@ from hrlearnium.config import Settings
 from hrlearnium.main import create_app
 from hrlearnium.models import ModelUnavailable
 from hrlearnium.schemas import Explanation, GroundedStatement, Principal, Selection
+from hrlearnium.service import CourseService
+
+
+class PreviewReranker:
+    def identity(self):
+        return {"model": "synthetic-ui-reranker"}
+
+    def readiness(self):
+        return {"ready": True, "inference_verified": False}
+
+    def score(self, question, candidates):
+        return [float(item.passage.chapter_number or 0) for item in candidates]
 
 
 class PreviewGateway(FakeGateway):
@@ -50,11 +62,23 @@ if __name__ == "__main__":
             retrieval_mode="full_context",
             max_token_lifetime_seconds=3600,
         )
-        app = create_app(settings, PreviewGateway())
+        app = create_app(settings, PreviewGateway(), PreviewReranker())
         principal = Principal(
             sub="learner-1", tenant_id="tenant-1", course_ids=[COURSE], scopes=["query"]
         )
         app.state.service.ingest(principal, COURSE, "Synthetic test source.docx", docx())
+        indexer = CourseService(
+            settings.model_copy(update={"retrieval_mode": "hybrid"}),
+            app.state.storage,
+            app.state.gateway,
+        )
+        indexer.ingest(principal, COURSE, "Synthetic test source.docx", docx())
+        app.state.service.ingest(principal, "course-unindexed", "Unindexed source.docx", docx())
         print("SYNTHETIC UI TEST ONLY: course-1, no model/provider calls.", flush=True)
-        print(token(exp=int(time.time()) + 3600)["Authorization"].removeprefix("Bearer "), flush=True)
+        print(
+            token(courses=[COURSE, "course-unindexed"], exp=int(time.time()) + 3600)[
+                "Authorization"
+            ].removeprefix("Bearer "),
+            flush=True,
+        )
         uvicorn.run(app, host="127.0.0.1", port=8001, access_log=False)

@@ -37,6 +37,18 @@ def test_chat_ui_does_not_remove_query_authentication(api_factory):
     assert gateway.selections == []
 
 
+def test_retrieval_picker_is_separate_from_answer_format_and_explains_setup(api_factory):
+    client, _, _ = api_factory()
+    page = client.get("/chat").text
+    assert '<label for="retrieval-mode">Retrieval mode</label>' in page
+    assert 'id="retrieval-mode" aria-describedby="retrieval-help" disabled' in page
+    for mode in ("full_context", "hybrid", "hybrid_rerank"):
+        assert f'<option value="{mode}">' in page
+    assert 'name="response-mode" value="explained" checked' in page
+    assert 'id="refresh-retrieval"' in page
+    assert 'id="retrieval-status-list"' in page
+
+
 @pytest.mark.parametrize("path", ["/", "/chat", "/chat/assets/app.mjs"])
 def test_chat_ui_can_be_disabled_independently_of_api_docs(api_factory, path):
     client, _, _ = api_factory(enable_chat_ui=False)

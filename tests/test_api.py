@@ -21,7 +21,7 @@ from hrlearnium.config import Settings
 from hrlearnium.main import create_app
 from hrlearnium.models import ModelUnavailable
 from hrlearnium.policy import CLARIFICATION, REFUSAL, non_answer_reply
-from hrlearnium.schemas import Selection
+from hrlearnium.schemas import CompleteSelection, CompleteVerification, QuestionPlan, Selection
 
 SECRET = "test-secret-at-least-32-characters-long-with-additional-test-only-entropy"
 COURSE = "course-1"
@@ -85,6 +85,117 @@ class FakeGateway:
         self.ready = True
         self.closed = False
         self.selections = []
+
+    def plan_request(self, question, previous_questions, *, translate, target_language):
+        """Test-only legacy fixture adapter. Production has no untyped-plan fallback."""
+        from hrlearnium.course_metadata import metadata_request
+        from hrlearnium.schemas import PlanVerification, RequestGroup, RequestPlan
+
+        old = self.plan(question, previous_questions, translate=translate)
+        check = self.verify_plan(question, previous_questions, old)
+        if not isinstance(check, PlanVerification):
+            raise ModelUnavailable("Invalid test plan verification")
+        self.request_check = check
+        sources = (
+            old.requirements if check.independent and len(old.requirements) > 1 else [question]
+        )
+        groups = []
+        for source in sources:
+            operation = metadata_request(
+                old.requirements[0] if len(sources) == 1 and len(old.requirements) == 1 else source
+            )
+            requirements = old.requirements if len(sources) == 1 else [source]
+            groups.append(
+                RequestGroup(
+                    original_text=source,
+                    kind="joint" if len(requirements) > 1 else "single",
+                    intent="metadata" if operation else "content",
+                    metadata_field=operation[0] if operation else None,
+                    chapter_number=operation[1] if operation else None,
+                    requirements=requirements,
+                    search_query=old.search_query if len(sources) == 1 else source,
+                    persian_query=old.persian_query if translate and not operation else None,
+                )
+            )
+        return RequestPlan(
+            answer_language=target_language, needs_clarification=False, groups=groups
+        )
+
+    def verify_request_plan(self, question, previous_questions, plan):
+        from hrlearnium.schemas import RequestPlanVerification
+
+        return RequestPlanVerification(
+            all_parts_identified=self.request_check.all_parts_identified,
+            no_added_requests=True,
+            grouping_valid=True,
+            intents_valid=True,
+        )
+
+    def repair_language(self, *args):
+        raise ModelUnavailable(
+            "Language repair not configured in this fake", code="invalid_answer_language"
+        )
+
+    def repair_request_plan(self, *args, **kwargs):
+        raise ModelUnavailable(
+            "Plan repair not configured in this fake", code="invalid_question_plan"
+        )
+
+    def plan(self, question, previous_questions, *, translate):
+        return QuestionPlan(
+            search_query=question,
+            requirements=[question],
+            persian_query="ترجمهٔ آزمایشی پرسش" if translate else None,
+        )
+
+    def verify_plan(self, question, previous_questions, plan):
+        from hrlearnium.schemas import PlanVerification
+
+        # Legacy tests exercise joint evidence/completeness contracts. New independent-
+        # question tests explicitly override this decision to exercise the new executor.
+        return PlanVerification(all_parts_identified=True, independent=False)
+
+    def select_complete(self, question, previous_questions, candidates, plan):
+        decision = self.select(question, previous_questions, candidates)
+        return CompleteSelection(
+            selection=decision,
+            coverage=[
+                {"requirement_index": i, "passage_ids": decision.passage_ids}
+                for i in range(len(plan.requirements))
+            ]
+            if decision.status == "answered"
+            else [],
+        )
+
+    def explain_complete(self, question, previous_questions, excerpts, plan, *, evidence_map=None):
+        return self.explain(question, previous_questions, excerpts)
+
+    def verify_complete(
+        self,
+        question,
+        previous_questions,
+        excerpts,
+        explanation,
+        plan,
+        *,
+        evidence_map=None,
+        language_repair_of=None,
+    ):
+        supported = self.verify_explanation(question, previous_questions, excerpts, explanation)
+        if type(supported) is not bool:
+            raise ModelUnavailable("Invalid explanation verification")
+        return CompleteVerification(
+            supported=supported,
+            all_question_parts_identified=True,
+            coverage=[
+                {
+                    "requirement_index": i,
+                    "covered": supported,
+                    "statement_indices": list(range(len(explanation.statements))),
+                }
+                for i in range(len(plan.requirements))
+            ],
+        )
 
     def identity(self):
         return "fake-v1"
@@ -248,7 +359,7 @@ def test_answer_is_exact_source_with_verifiable_unicode_offsets_and_hash(api_fac
     result = response.json()
     assert result["status"] == "answered"
     assert result["retrieval_mode"] == "hybrid"
-    assert result["policy_version"] == "grounded-course-v3"
+    assert result["policy_version"] == "grounded-course-v11.1"
     assert result["request_id"] == response.headers["x-request-id"]
     assert result["answer"] == "\n\n".join(excerpt["text"] for excerpt in result["excerpts"])
     source = "\n".join(PARAGRAPHS)

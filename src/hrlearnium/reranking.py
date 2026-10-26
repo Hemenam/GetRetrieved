@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import inspect
 import math
 import threading
 from dataclasses import replace
 from importlib.util import find_spec
 from numbers import Real
+from pathlib import Path
 from typing import Protocol
 
-from hrlearnium.config import Settings
+from hrlearnium.core_config import CoreSettings
 from hrlearnium.models import ModelUnavailable
 from hrlearnium.retrieval import Candidate
 
@@ -59,7 +61,7 @@ class CrossEncoderReranker:
     Overlong query/passage pairs are rejected instead of silently truncating evidence.
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: CoreSettings):
         self.settings = settings
         self._encoder = None
         self._lock = threading.Lock()
@@ -78,13 +80,58 @@ class CrossEncoderReranker:
 
     def readiness(self) -> dict:
         installed = find_spec("sentence_transformers") is not None
+        files_present = self._encoder is not None or (installed and self._local_files_present())
         return {
-            "ready": installed,
+            "ready": installed and (files_present or not self.settings.reranker_local_files_only),
             "check": "configuration_only",
             "model_loaded": self._encoder is not None,
+            "model_files_available": files_present,
+            "download_required": not files_present,
             "inference_verified": False,
             "missing_dependencies": [] if installed else ["hrlearnium-chatbot[rerank]"],
         }
+
+    def _local_files_present(self) -> bool:
+        """Inspect local files/cache only; never import the ML runtime or download a model."""
+        directory = Path(self.settings.reranker_model)
+
+        def present(filename):
+            if directory.is_dir():
+                return (directory / filename).is_file()
+            from huggingface_hub import try_to_load_from_cache
+
+            return isinstance(
+                try_to_load_from_cache(
+                    self.settings.reranker_model, filename, revision=self.settings.reranker_revision
+                ),
+                str,
+            )
+
+        try:
+            return (
+                present("config.json")
+                and any(
+                    present(name)
+                    for name in (
+                        "model.safetensors",
+                        "pytorch_model.bin",
+                        "model.safetensors.index.json",
+                        "pytorch_model.bin.index.json",
+                    )
+                )
+                and any(
+                    present(name)
+                    for name in (
+                        "tokenizer.json",
+                        "sentencepiece.bpe.model",
+                        "spiece.model",
+                        "vocab.txt",
+                        "vocab.json",
+                    )
+                )
+            )
+        except (ImportError, OSError, ValueError):
+            return False
 
     def _load(self):
         if self._encoder is None:
@@ -132,6 +179,13 @@ class CrossEncoderReranker:
                     batch_size=self.settings.reranker_batch_size,
                     show_progress_bar=False,
                     convert_to_numpy=True,
+                    # Keep raw logits: the library otherwise applies a default sigmoid.
+                    # Newer releases renamed this keyword; support the >=5.0 optional runtime.
+                    **{
+                        "activation_fn"
+                        if "activation_fn" in inspect.signature(encoder.predict).parameters
+                        else "activation_fct": lambda logits: logits
+                    },
                 )
                 # Classifier vectors cannot be interpreted as scalar relevance scores.
                 if getattr(values, "ndim", 1) != 1:

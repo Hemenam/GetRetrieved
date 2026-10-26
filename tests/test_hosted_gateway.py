@@ -243,6 +243,7 @@ def test_http_failures_do_not_redirect_retry_or_expose_provider_details(settings
 
 
 def test_timeout_does_not_expose_request_or_retry(settings):
+    settings.api_max_retries = 0
     calls = []
 
     def handler(request):
@@ -384,7 +385,15 @@ def test_explanation_and_verification_are_separate_calls_with_cited_evidence(set
         calls.append(payload)
         assert payload["question"] == "اولویت چیست؟"
         assert payload["previous_questions"] == ["سؤال قبلی"]
-        assert payload["excerpts"] == [excerpt().model_dump()]
+        assert payload["excerpts"] == [
+            {
+                "id": excerpt().id,
+                "text": excerpt().text,
+                "chapter_title": excerpt().citation.chapter_title,
+                "section_kind": excerpt().citation.section_kind,
+            }
+        ]
+        assert "source_start" not in json.dumps(payload) and "source_end" not in json.dumps(payload)
         schema = (
             body["format"]
             if backend == "ollama"
