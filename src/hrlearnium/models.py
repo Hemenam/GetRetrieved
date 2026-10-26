@@ -16,6 +16,13 @@ from hrlearnium.evaluation import (
     review_contract_check,
     stage,
 )
+from hrlearnium.fact_contracts import (
+    FactExplanationBase,
+    bind_writer_facts,
+    fact_explanation_model,
+    normalize_precise_brief,
+    precise_brief_model,
+)
 from hrlearnium.language import response_context
 from hrlearnium.policy import (
     ANSWER_REPAIR_INSTRUCTIONS,
@@ -59,7 +66,7 @@ from hrlearnium.schemas import (
     UnitRoutes,
     UntranslatedQuestionPlan,
 )
-from hrlearnium.selection_contract import brief_decision_model, decision_model
+from hrlearnium.selection_contract import decision_model
 from hrlearnium.source_spans import source_spans
 from hrlearnium.text import normalize_persian
 
@@ -225,6 +232,7 @@ def _content_limit(model: type[BaseModel]) -> int:
     return (
         24000
         if model in {Explanation, AnswerReview, SpanAnswerReview, EvidenceBrief}
+        or issubclass(model, FactExplanationBase)
         else 1000
         if model is ExplanationVerification
         else 12000
@@ -277,16 +285,11 @@ class _EvidenceGateway:
         spans = source_spans([c.passage for c in candidates])
         if not spans or len(spans) > 450:
             raise ModelUnavailable("Invalid evidence catalog bounds", code="invalid_evidence_brief")
-        compact = bool(
-            re.search(r"همیشه|\balways\b|یعنی|\bdoes that mean\b", normalize_persian(question))
-        )
-        model = brief_decision_model(
-            [c.passage.id for c in candidates], budget, max_facts=2 if compact else 8
-        )
+        model = precise_brief_model([c.passage.id for c in candidates], spans, budget)
         result = self._structured(
             model,
             EVIDENCE_BRIEF_INSTRUCTIONS
-            + "\nReturn decision. Select the smallest complete source_ids list within the fixed budget. Facts use source_indices into that list, NEVER passage IDs or span IDs. For required_value_kind, requested_values must contain the actual literal requested names/numbers/medication values and their source_index. Questions, role labels and template placeholders are NOT values; if no such value exists return refused. For all other requests requested_values=[]. When review_feedback is supplied, repair its actual failures: remove incidental rejected claims or cite their genuinely supporting source. Never replay a rejected claim with the same insufficient citation. Facts needed only for background, unrequested examples and unrelated actors should be omitted. The original question, not the rejected draft, defines completeness.",
+            + "\nReturn decision. Select the smallest complete source_ids list. Each fact selects ONLY the exact support_spans IDs actually supporting that fact, not every span in a passage. Every span must belong to a selected source; every selected source must support a fact. Preserve explicit numbers, conditions, uncertainty, actors and example/rule scope. Do not add optional background, examples or recaps. requested_values uses the actual literal value and its source_index; for other requests requested_values=[]. Repair feedback by removing unsupported extras or selecting genuinely supporting spans, never merely relabeling a rejected claim.",
             {
                 "question": question,
                 "previous_questions": previous,
@@ -302,53 +305,26 @@ class _EvidenceGateway:
                 "source_context": [
                     {
                         "id": c.passage.id,
-                        "text": c.passage.text,
                         "chapter_title": c.passage.chapter_title,
                         "section_kind": c.passage.section_kind,
                     }
                     for c in candidates
                 ],
+                "support_spans": self._span_payload(spans),
                 **response_context(question),
             },
             model.model_json_schema(),
         )
         decision = result.model_dump(mode="json")["decision"]
-        if decision["status"] != "answered":
-            return EvidenceBrief(
-                status=decision["status"],
-                reason_code=decision["reason_code"],
-                complete=False,
-                facts=[],
-            )
-        ids = decision["source_ids"]
-        return EvidenceBrief(
-            status="answered",
-            reason_code="supported",
-            complete=True,
-            facts=[
-                {
-                    "text": f["text"],
-                    "span_ids": list(
-                        dict.fromkeys(
-                            s["id"]
-                            for s in spans
-                            if s["citation_id"] in {ids[i] for i in f["source_indices"]}
-                        )
-                    ),
-                }
-                for f in decision["facts"]
-            ],
-            requested_values=[
-                {"value": v["value"], "source_id": ids[v["source_index"]]}
-                for v in decision["requested_values"]
-            ],
-        )
+        return normalize_precise_brief(decision, spans)
 
     def explain_from_brief(self, question, previous, excerpts, plan, brief):
         from hrlearnium.request_units import is_course_overview
 
         payload = self._explanation_payload(question, previous, excerpts)
         payload["approved_facts"] = brief.model_dump()
+        for index, fact in enumerate(payload["approved_facts"]["facts"]):
+            fact["fact_index"] = index
         spans = {s["id"]: s for s in source_spans(excerpts)}
         by_id = {e.id: e for e in excerpts}
         for fact in payload["approved_facts"]["facts"]:
@@ -366,24 +342,30 @@ class _EvidenceGateway:
                     else "در مثال آموزشی دوره (نه واقعیت تأییدشده شرکت دانشجو): "
                 )
                 fact["text"] = scope + fact["text"]
-        payload["support_spans"] = self._span_payload(source_spans(excerpts))
-        schema = Explanation.model_json_schema()
-        schema["$defs"]["GroundedStatement"]["properties"]["citation_ids"]["items"] = {
-            "type": "string",
-            "enum": [e.id for e in excerpts],
-        }
-        return self._structured(
-            Explanation,
+        allowed_spans = {s for f in brief.facts for s in f.span_ids}
+        payload["support_spans"] = self._span_payload(
+            [s for s in spans.values() if s["id"] in allowed_spans]
+        )
+        # Writers see only the approved evidence, not full passages inviting extra claims.
+        payload.pop("excerpts", None)
+        model = fact_explanation_model(len(brief.facts))
+        written = self._structured(
+            model,
             BRIEF_WRITING_INSTRUCTIONS
-            + "\nPreserve every approved fact relevant to the original request. For a short summary combine facts into fewer sentences; do not silently drop whole learning themes. Cite each statement's own evidence, not one convenient source for a multi-source comparison. Any statement supported ONLY by example/exercise passages MUST explicitly say 'in the course example' or 'the course exercise proposes' (or the Persian equivalent). Do not turn an instruction to create something into a claim that it already exists. Preserve every source rule's do/do-not polarity; never insert or remove a negation."
+            + "\nReturn statements with text and fact_indices, NEVER authored citation IDs. Python derives citations from those facts. Preserve every approved fact needed by the question; omit optional examples, benefits and recaps. Each clause must follow from its referenced facts, including conditions, numeric values and rule/example scope. Lists/comparisons must remain complete. Keep distinct claims separate unless their combined statement references all required facts. Example/exercise-only claims must be explicitly attributed. Do not infer that a template/exercise is a real company event."
             + (
                 "\nThis is a broad course overview, not a chapter-by-chapter dump. Summarize the supplied learning themes in at most THREE concise statements, combining related themes with all their supporting citations."
                 if is_course_overview(question)
                 else ""
             ),
             payload,
-            schema,
+            model.model_json_schema(),
         )
+        draft, mappings = bind_writer_facts(written, brief, excerpts)
+        from hrlearnium import evaluation
+
+        evaluation.writer_fact_references(mappings)
+        return draft
 
     def _structured(
         self,
@@ -965,7 +947,7 @@ class OllamaGateway(_EvidenceGateway):
                     "num_ctx": 32768,
                     "num_predict": (
                         4096
-                        if issubclass(model, EvidenceDecisionEnvelopeBase)
+                        if issubclass(model, (EvidenceDecisionEnvelopeBase, FactExplanationBase))
                         or model
                         in {
                             Explanation,

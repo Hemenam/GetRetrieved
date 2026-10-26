@@ -96,6 +96,7 @@ def configuration(settings, reranker=None) -> dict:
         "source_rules",
         "request_units",
         "answer_contracts",
+        "fact_contracts",
     ):
         code.update(name.encode())
         code.update(Path(__file__).with_name(name + ".py").read_bytes())
@@ -413,6 +414,12 @@ def review_contract_check(attempt, review, issues, *, conservative_rejection=Fal
                 "server_conservative_rejection": conservative_rejection,
             }
         )
+
+
+def writer_fact_references(mappings):
+    trace = _trace.get()
+    if trace is not None:
+        trace.setdefault("writer_fact_bindings", []).append(mappings)
 
 
 def provider_usage(result: dict, model: str, kind: str):

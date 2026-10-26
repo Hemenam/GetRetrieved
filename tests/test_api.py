@@ -359,7 +359,9 @@ def test_answer_is_exact_source_with_verifiable_unicode_offsets_and_hash(api_fac
     result = response.json()
     assert result["status"] == "answered"
     assert result["retrieval_mode"] == "hybrid"
-    assert result["policy_version"] == "grounded-course-v11.1"
+    from hrlearnium.schemas import POLICY_VERSION
+
+    assert result["policy_version"] == POLICY_VERSION
     assert result["request_id"] == response.headers["x-request-id"]
     assert result["answer"] == "\n\n".join(excerpt["text"] for excerpt in result["excerpts"])
     source = "\n".join(PARAGRAPHS)

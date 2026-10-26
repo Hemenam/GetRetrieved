@@ -447,7 +447,7 @@ def test_writer_gets_server_owned_scope_before_example_or_exercise_facts(setting
                     "statements": [
                         {
                             "text": "طبق تمرین دوره یک گروه بسازید.",
-                            "citation_ids": [source.id],
+                            "fact_indices": [0],
                         }
                     ]
                 }
@@ -562,7 +562,10 @@ def test_shipped_v10_gateway_full_http_path_has_no_offsets_in_llm_context(api_fa
                 ]
             }
         elif "source_context" in payload:
-            source = next(s for s in payload["source_context"] if "واقعیت" in s["text"])
+            supported_span = next(s for s in payload["support_spans"] if "واقعیت" in s["text"])
+            source = next(
+                s for s in payload["source_context"] if s["id"] == supported_span["citation_id"]
+            )
             assert "start" not in source and "end" not in source
             value = {
                 "decision": {
@@ -572,7 +575,7 @@ def test_shipped_v10_gateway_full_http_path_has_no_offsets_in_llm_context(api_fa
                     "facts": [
                         {
                             "text": "پیام شامل واقعیت، اقدام سازمان و گام بعدی کارکنان است.",
-                            "source_indices": [0],
+                            "span_ids": [supported_span["id"]],
                         }
                     ],
                     "requested_values": [],
@@ -583,7 +586,7 @@ def test_shipped_v10_gateway_full_http_path_has_no_offsets_in_llm_context(api_fa
                 "statements": [
                     {
                         "text": payload["approved_facts"]["facts"][0]["text"],
-                        "citation_ids": [payload["excerpts"][0]["id"]],
+                        "fact_indices": [0],
                     }
                 ]
             }
