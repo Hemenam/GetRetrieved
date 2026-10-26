@@ -16,6 +16,7 @@ from hrlearnium.policy import (
     BRIEF_WRITING_INSTRUCTIONS,
     COMPLETE_SELECTION_INSTRUCTIONS,
     COMPLETE_VERIFICATION_INSTRUCTIONS,
+    DETAILED_SPAN_REVIEW_INSTRUCTIONS,
     EVIDENCE_BRIEF_INSTRUCTIONS,
     EXPLANATION_INSTRUCTIONS,
     LANGUAGE_REPAIR_INSTRUCTIONS,
@@ -77,6 +78,7 @@ def configuration(settings, reranker=None) -> dict:
         EVIDENCE_BRIEF_INSTRUCTIONS,
         BRIEF_WRITING_INSTRUCTIONS,
         SPAN_REVIEW_INSTRUCTIONS,
+        DETAILED_SPAN_REVIEW_INSTRUCTIONS,
     ]
     code = hashlib.sha256()
     for name in (
@@ -98,6 +100,7 @@ def configuration(settings, reranker=None) -> dict:
         "answer_contracts",
         "fact_contracts",
         "request_modifiers",
+        "detailed_review",
     ):
         code.update(name.encode())
         code.update(Path(__file__).with_name(name + ".py").read_bytes())
@@ -396,7 +399,7 @@ def answer_attempt(
                 "local_contract_failures": list(local_failures or []),
                 "explanation": explanation.model_dump(),
                 "verification": verification.model_dump(),
-                "review_protocol": "consistent_server_span_ids_v11"
+                "review_protocol": trace.get("reviewer_protocol", "consistent_server_span_ids_v11")
                 if hasattr(review, "intent")
                 else "legacy_quote_or_boolean_review",
                 "review": review.model_dump() if review is not None else None,
@@ -404,14 +407,16 @@ def answer_attempt(
         )
 
 
-def review_contract_check(attempt, review, issues, *, conservative_rejection=False):
+def review_contract_check(attempt, review, issues, *, conservative_rejection=False, protocol=None):
     trace = _trace.get()
     if trace is not None:
+        if protocol is not None:
+            trace["reviewer_protocol"] = protocol
         trace.setdefault("review_contract_attempts", []).append(
             {
                 "attempt": attempt,
                 "issues": list(issues),
-                "review": review.model_dump(),
+                "review": review.model_dump() if review is not None else None,
                 "server_conservative_rejection": conservative_rejection,
             }
         )

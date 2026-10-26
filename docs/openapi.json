@@ -1079,7 +1079,7 @@
           "policy_version": {
             "type": "string",
             "title": "Policy Version",
-            "default": "grounded-course-v10"
+            "default": "grounded-course-v12.2"
           },
           "evaluation": {
             "anyOf": [

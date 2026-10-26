@@ -341,6 +341,9 @@ def test_http_api_executes_real_gateway_typed_plan_metadata_and_language_repair(
                 "source_stance_preserved": True,
                 "causal_claims_supported": True,
             }
+            from test_answer_support_v9 import detailed_wire
+
+            value = detailed_wire(value)
         reply = completion(value)
         reply["usage"] = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
         return response(reply)

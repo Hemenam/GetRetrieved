@@ -9,6 +9,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from hrlearnium.core_config import CoreSettings
+from hrlearnium.detailed_review import DetailedSpanReview, normalize_detailed_review
 from hrlearnium.evaluation import (
     ERROR_CODES,
     provider_attempt,
@@ -30,6 +31,7 @@ from hrlearnium.policy import (
     BRIEF_WRITING_INSTRUCTIONS,
     COMPLETE_SELECTION_INSTRUCTIONS,
     COMPLETE_VERIFICATION_INSTRUCTIONS,
+    DETAILED_SPAN_REVIEW_INSTRUCTIONS,
     EVIDENCE_BRIEF_INSTRUCTIONS,
     EXPLANATION_INSTRUCTIONS,
     LANGUAGE_REPAIR_INSTRUCTIONS,
@@ -41,7 +43,6 @@ from hrlearnium.policy import (
     ROUTE_VERIFICATION_INSTRUCTIONS,
     ROUTING_INSTRUCTIONS,
     SELECTOR_INSTRUCTIONS,
-    SPAN_REVIEW_INSTRUCTIONS,
     UNIT_ROUTING_INSTRUCTIONS,
     VERIFICATION_INSTRUCTIONS,
 )
@@ -231,8 +232,8 @@ def _content_limit(model: type[BaseModel]) -> int:
         return 32000
     return (
         24000
-        if model in {Explanation, AnswerReview, SpanAnswerReview, EvidenceBrief}
-        or issubclass(model, FactExplanationBase)
+        if model in {Explanation, AnswerReview, SpanAnswerReview, DetailedSpanReview, EvidenceBrief}
+        or issubclass(model, (FactExplanationBase, EvidenceDecisionEnvelopeBase))
         else 1000
         if model is ExplanationVerification
         else 12000
@@ -506,7 +507,7 @@ class _EvidenceGateway:
             payload["requirement_evidence"] = [p.model_dump() for p in evidence_map.coverage]
         if language_repair_of is not None:
             payload["original_explanation_to_preserve"] = language_repair_of.model_dump()
-        schema = SpanAnswerReview.model_json_schema()
+        schema = DetailedSpanReview.model_json_schema()
         schema["$defs"]["SpanStatementSupport"]["properties"]["span_ids"]["items"] = {
             "type": "string",
             "enum": [s["id"] for s in spans],
@@ -523,38 +524,36 @@ class _EvidenceGateway:
             "type": "integer",
             "enum": list(range(len(explanation.statements))),
         }
-        from hrlearnium.answer_contracts import conservative_rejection, review_contract_issues
-
-        review = self._structured(SpanAnswerReview, SPAN_REVIEW_INSTRUCTIONS, payload, schema)
-        issues = review_contract_issues(review, len(explanation.statements), len(plan.requirements))
-        review_contract_check(1, review, issues)
-        if not issues:
-            return review
-        # One correction of the REVIEW, not a rewrite of a potentially correct answer.
-        # Preserve the original question, draft, evidence and rejection; never flip flags locally.
-        payload["review_contract_feedback"] = {
-            "issues": issues,
-            "previous_review": review.model_dump(),
-        }
-        with stage("review_contract_repair"):
-            review = self._structured(
-                SpanAnswerReview,
-                SPAN_REVIEW_INSTRUCTIONS
-                + "\nYour previous review violated the local consistency contract. Independently re-audit the UNCHANGED draft and evidence. Return consistent checks and specific reasons for any rejection. Do not accept just to remove the contradiction, and do not rewrite the answer.",
-                payload,
-                schema,
-            )
-        issues = review_contract_issues(review, len(explanation.statements), len(plan.requirements))
-        review_contract_check(2, review, issues)
-        if issues:
-            rejected = conservative_rejection(review, issues)
-            if rejected is None or review_contract_issues(
-                rejected, len(explanation.statements), len(plan.requirements)
-            ):
-                raise ModelUnavailable("Inconsistent answer reviewer", code="invalid_answer_review")
-            review_contract_check(2, rejected, [], conservative_rejection=True)
-            return rejected
-        return review
+        for attempt in range(2):
+            wire = None
+            try:
+                instructions = DETAILED_SPAN_REVIEW_INSTRUCTIONS
+                if attempt:
+                    instructions += "\nRepair the malformed REVIEW contract by re-auditing the UNCHANGED draft and evidence. Retain all genuine negative semantic judgments; do not approve merely to satisfy the schema. Do not rewrite the answer."
+                    with stage("review_contract_repair"):
+                        wire = self._structured(DetailedSpanReview, instructions, payload, schema)
+                else:
+                    wire = self._structured(DetailedSpanReview, instructions, payload, schema)
+                review = normalize_detailed_review(wire, explanation, plan, excerpts)
+                review_contract_check(attempt + 1, wire, [], protocol="detailed_span_checks_v12")
+                return review
+            except ModelUnavailable as error:
+                if error.diagnostic_code not in {
+                    "structured_response_invalid",
+                    "invalid_answer_review",
+                }:
+                    raise
+                review_contract_check(
+                    attempt + 1, wire, [error.diagnostic_code], protocol="detailed_span_checks_v12"
+                )
+                if attempt:
+                    raise ModelUnavailable(
+                        "Invalid detailed answer review", code="invalid_answer_review"
+                    ) from None
+                payload["review_contract_feedback"] = {
+                    "issues": [error.diagnostic_code],
+                    "previous_review": wire.model_dump() if wire is not None else None,
+                }
 
     def plan(
         self, question: str, previous_questions: list[str], *, translate: bool
@@ -955,6 +954,7 @@ class OllamaGateway(_EvidenceGateway):
                             RoutePlan,
                             AnswerReview,
                             SpanAnswerReview,
+                            DetailedSpanReview,
                             UnitRoutes,
                             EvidenceBrief,
                         }

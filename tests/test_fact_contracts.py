@@ -66,6 +66,20 @@ def test_fact_preserves_exact_selected_spans_not_every_span_in_passage():
     assert brief.facts[0].text == value["facts"][0]["text"]
 
 
+def test_bounded_brief_wire_limit_can_hold_schema_valid_large_facts():
+    from hrlearnium.models import _content_limit
+
+    value, spans = decision()
+    model = precise_brief_model(["one", "two"], spans, 1)
+    refs = [spans[0]["id"]] * 16
+    # Transport size handling precedes duplicate/ownership validation. Its size
+    # ceiling must not reject bounded schema-valid output before those checks.
+    value["facts"] = [{"text": "A" * 1000, "span_ids": refs} for _ in range(8)]
+    value["requested_values"] = [{"value": "V" * 200, "source_index": 0} for _ in range(8)]
+    parsed = model.model_validate({"decision": value})
+    assert len(parsed.model_dump_json()) <= _content_limit(model)
+
+
 @pytest.mark.parametrize(
     "fault",
     ["unknown_span", "foreign_source", "duplicate_span", "duplicate_source", "unused_source"],

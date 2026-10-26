@@ -68,6 +68,17 @@ def span_review(draft, sources, **intent_changes):
     )
 
 
+def detailed_wire(review):
+    """New shipped wire format; legacy in-process review fixtures stay unchanged."""
+    value = review.model_dump() if hasattr(review, "model_dump") else dict(review)
+    verification = value.pop("verification")
+    return {
+        "all_question_parts_identified": verification["all_question_parts_identified"],
+        "coverage": verification["coverage"],
+        **value,
+    }
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -165,7 +176,8 @@ def test_shipped_span_review_wire_schema_and_repair(settings, backend):
             assert schema["$defs"]["SpanStatementSupport"]["properties"]["span_ids"]["items"][
                 "enum"
             ] == [s["id"] for s in source_spans([source])]
-            value = expected.model_dump()
+            assert "verification" not in schema["properties"]
+            value = detailed_wire(expected)
         else:
             assert payload["verification"] == expected.model_dump()
             value = draft.model_dump()

@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from test_answer_support_v9 import span_review
+from test_answer_support_v9 import detailed_wire, span_review
 from test_api import BASE, QUESTION, token, upload
 from test_api import api_factory as api_factory
 from test_hosted_gateway import completion, excerpt, explanation, gateway, response
@@ -43,13 +43,13 @@ def test_review_consistency_never_flips_a_verdict(verdict):
     assert review.model_dump() == original
 
 
-@pytest.mark.parametrize("second", ["pass", "reject", "contradiction"])
+@pytest.mark.parametrize("second", ["pass", "reject", "malformed"])
 def test_gateway_rechecks_unchanged_draft_once_then_fails_closed(settings, second):
     draft, source, calls = explanation(), excerpt(), []
     good = span_review(draft, [source])
-    broken = good.model_copy(deep=True)
-    broken.verification.supported = False
-    rejected = broken.model_copy(deep=True)
+    broken = detailed_wire(good)
+    broken["statements"][0]["span_ids"] = ["unknown-span"]
+    rejected = good.model_copy(deep=True)
     rejected.statements[0].supported = False
     rejected.statements[0].span_ids = []
     rejected.rejection_reasons = ["Statement 0 is not entailed by its source."]
@@ -60,17 +60,21 @@ def test_gateway_rechecks_unchanged_draft_once_then_fails_closed(settings, secon
         if len(calls) == 2:
             assert payload["explanation"] == calls[0]["explanation"]
             assert payload["support_spans"] == calls[0]["support_spans"]
-            assert payload["review_contract_feedback"]["previous_review"] == broken.model_dump()
+            assert payload["review_contract_feedback"]["previous_review"] == broken
         value = (
             broken
             if len(calls) == 1
-            else {"pass": good, "reject": rejected, "contradiction": broken}[second]
+            else {
+                "pass": detailed_wire(good),
+                "reject": detailed_wire(rejected),
+                "malformed": broken,
+            }[second]
         )
-        return response(completion(value.model_dump()))
+        return response(completion(value))
 
     model = gateway(settings, handler)
     try:
-        if second == "contradiction":
+        if second == "malformed":
             with pytest.raises(ModelUnavailable) as error:
                 model.review_grounded_answer("A question", [], [source], draft, plan())
             assert error.value.diagnostic_code == "invalid_answer_review"
@@ -165,20 +169,21 @@ def test_conservative_aggregate_repair_can_only_reject_never_approve():
     assert review.verification.supported is True
 
 
-def test_second_contradictory_positive_aggregate_preserves_detailed_rejection(settings):
+def test_legitimate_detailed_rejection_needs_no_contract_repair(settings):
     draft, source, calls = explanation(), excerpt(), []
     rejected = span_review(draft, [source])
     rejected.statements[0].supported = False
     rejected.statements[0].span_ids = []
+    rejected.rejection_reasons = ["Statement 0 adds an unsupported benefit."]
 
     def handler(request):
         calls.append(request)
-        return response(completion(rejected.model_dump()))
+        return response(completion(detailed_wire(rejected)))
 
     model = gateway(settings, handler)
     try:
         result = model.review_grounded_answer("A question", [], [source], draft, plan())
-        assert len(calls) == 2 and not result.verification.supported
+        assert len(calls) == 1 and not result.verification.supported
         assert result.statements == rejected.statements
     finally:
         model.close()

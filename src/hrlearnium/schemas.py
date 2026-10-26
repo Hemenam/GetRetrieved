@@ -7,7 +7,7 @@ Identifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.
 Scope = Literal["query", "content:read", "content:write"]
 ResponseMode = Literal["verbatim", "explained"]
 RetrievalMode = Literal["full_context", "hybrid", "hybrid_rerank"]
-POLICY_VERSION = "grounded-course-v12.1"
+POLICY_VERSION = "grounded-course-v12.2"
 AnswerLanguage = Literal["fa", "en"]
 MetadataField = Literal[
     "course_title",

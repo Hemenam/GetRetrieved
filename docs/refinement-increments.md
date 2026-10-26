@@ -50,3 +50,40 @@ so normal evidence/coverage review still applies. Public API parts are unchanged
 Synthetic Persian/English grouping and HTTP tests cover duplicate-answer prevention,
 independent questions, quoted punctuation, repeated text, invalid parent relations
 and lossless fallback. No question-specific benchmark exception was added.
+
+## Increment 3: v12.2 detailed reviewer decisions
+
+The shipped gateways now request detailed statement, requirement-coverage and
+intent checks only. The model no longer authors a second, independent overall
+support Boolean. Python validates complete unique indices, reasons and span
+ownership, then computes the conjunction into the unchanged internal review type.
+Every negative semantic judgment remains negative. This is a new protocol, not
+reinterpretation of old rejected outputs.
+
+A legitimate rejection goes directly to the existing single bounded answer
+repair. A malformed reviewer contract can receive one unchanged-draft re-audit;
+a second malformed result fails closed. Permanent provider/auth/billing errors
+are not retried as review-contract problems. Successful independent siblings
+remain available. Legacy in-process adapters returning the previous internal
+review model still work; old wire payloads are not silently accepted on the new
+shipped protocol. Raw detailed checks and normalized results remain traceable.
+
+Hosted strict-schema, JSON-object and Ollama tests cover the protocol, plus direct
+negative-intent/claim/coverage cases, malformed-index/source/reason failures,
+optional-versus-required pruning and sibling preservation. The bounded transport
+ceiling also accommodates large valid fact-brief payloads. None of these checks
+proves semantic entailment: the model can still misjudge a claim or completeness.
+
+No paid requests or source/reference edits were made. Current-version quality,
+repeat reliability, model/cascade ablations and cross-course generalization still
+need separately authorized evaluation. These code changes do not establish a
+new benchmark accuracy figure or section-level permissions.
+
+## Offline validation
+
+The complete v12.2 working copy passed 1,184 Python tests (including locally
+available private snapshot checks), 36 frontend tests, Ruff lint and formatting
+checks for the new/refined modules. Provider responses in integration tests are
+mocked; these counts are software regression results, not chatbot accuracy.
+A staged public-file export without `.env`, course documents or private packs
+also passed 1,139 Python tests, with 45 explicit private-fixture skips.

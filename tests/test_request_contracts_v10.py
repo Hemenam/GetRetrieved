@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from test_answer_support_v9 import span_review
+from test_answer_support_v9 import detailed_wire, span_review
 from test_api import BASE, QUESTION, token, upload
 from test_api import api_factory as api_factory
 from test_hosted_gateway import assert_strict_schema, completion, gateway, response
@@ -615,6 +615,8 @@ def test_shipped_v10_gateway_full_http_path_has_no_offsets_in_llm_context(api_fa
                     }
                 ],
             }
+        if "verification" in value and "intent" in value:
+            value = detailed_wire(value)
         return response(completion(value))
 
     model = gateway(settings, handler)
