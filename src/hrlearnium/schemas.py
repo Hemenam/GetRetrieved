@@ -7,7 +7,7 @@ Identifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.
 Scope = Literal["query", "content:read", "content:write"]
 ResponseMode = Literal["verbatim", "explained"]
 RetrievalMode = Literal["full_context", "hybrid", "hybrid_rerank"]
-POLICY_VERSION = "grounded-course-v12.0"
+POLICY_VERSION = "grounded-course-v12.1"
 AnswerLanguage = Literal["fa", "en"]
 MetadataField = Literal[
     "course_title",
@@ -194,6 +194,7 @@ class RoutePlan(StrictModel):
 
 class UnitRoute(StrictModel):
     unit_index: int = Field(strict=True, ge=0, le=7)
+    parent_unit_index: Annotated[int, Field(strict=True, ge=0, le=7)] | None = None
     intent: Literal["content", "metadata"]
     metadata_fields: list[MetadataField] = Field(max_length=8)
     chapter_number: Annotated[int, Field(strict=True, ge=1)] | None

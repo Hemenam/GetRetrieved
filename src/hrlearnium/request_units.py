@@ -122,7 +122,7 @@ def is_course_overview(question):
     )
 
 
-def compile_units(units, proposed, language, *, translate=False):
+def compile_units(units, proposed, language, *, translate=False, original_question=None):
     if len(units) > 8:
         return RequestPlan(answer_language=language, needs_clarification=True, groups=[])
     routes = {r.unit_index: r for r in proposed.units} if isinstance(proposed, UnitRoutes) else {}
@@ -130,8 +130,27 @@ def compile_units(units, proposed, language, *, translate=False):
         len(routes) != len(proposed.units) or set(routes) != set(range(len(units)))
     ):
         raise ValueError("unit_indices_not_complete_unique")
+    from hrlearnium.request_modifiers import attach_modifiers
+
+    if any(
+        r.parent_unit_index is not None
+        and (
+            r.intent != "content"
+            or r.metadata_fields
+            or r.chapter_number is not None
+            or r.persian_query is not None
+        )
+        for r in routes.values()
+    ):
+        raise ValueError("modifier_must_not_add_metadata_or_search_task")
+    attached = attach_modifiers(
+        original_question if original_question is not None else " ".join(units),
+        units,
+        {i: routes[i].parent_unit_index if i in routes else None for i in range(len(units))},
+    )
     groups = []
-    for i, text in enumerate(units):
+    for item in attached:
+        i, text = item.unit_indices[0], item.text
         route = routes.get(i)
         exact = metadata_request(strip_language_directive(text))
         fields = (

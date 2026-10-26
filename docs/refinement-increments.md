@@ -33,3 +33,20 @@ including foreign/stale spans, duplicate IDs, two-sided citation ownership and
 fact-index bounds. These are provenance/control-flow checks, not proof that a
 model preserves every condition or never invents an unsupported clause. The
 normal independent semantic review and bounded repair remain in place.
+
+## Increment 2: v12.1 dependent presentation instructions
+
+Indexed classification can now attach a later presentation-only segment to its
+earlier adjacent independent request. It cannot rewrite text, chain modifiers,
+attach forward, skip an independent question, add metadata/search tasks or drop
+segments. Python builds exact slices of the original request and validates every
+index. Invalid plans fall back to all original independent units. Comparisons
+remain joint tasks; true independent questions remain separate.
+
+The classifier still makes the semantic format-only judgment; this is not a
+general dependency planner or a guarantee that it never misclassifies intent.
+Every grouped question includes the entire original text in its requirements,
+so normal evidence/coverage review still applies. Public API parts are unchanged.
+Synthetic Persian/English grouping and HTTP tests cover duplicate-answer prevention,
+independent questions, quoted punctuation, repeated text, invalid parent relations
+and lossless fallback. No question-specific benchmark exception was added.

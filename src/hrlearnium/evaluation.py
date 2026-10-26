@@ -97,6 +97,7 @@ def configuration(settings, reranker=None) -> dict:
         "request_units",
         "answer_contracts",
         "fact_contracts",
+        "request_modifiers",
     ):
         code.update(name.encode())
         code.update(Path(__file__).with_name(name + ".py").read_bytes())
@@ -118,7 +119,7 @@ def configuration(settings, reranker=None) -> dict:
         "candidate_limit": settings.candidate_limit,
         "question_planning": {
             "plan_repair_limit": 1,
-            "routing_protocol": "v10 server-owned request units; index-only classification; no text retyping or cross-unit merge",
+            "routing_protocol": "v12 indexed segments with bounded source-literal presentation attachments",
             "pre_retrieval_clarification": False,
             "routing_fallback": "whole original request, normal evidence gates, no invented execution plan",
             "answer_repair_limit_per_group": 1,
@@ -341,7 +342,7 @@ def requirement_selection(selection, status):
 def unit_routing(units, proposed, plan):
     trace = _trace.get()
     if trace is not None:
-        trace["routing_protocol"] = "v10_indexed_units"
+        trace["routing_protocol"] = "v12_indexed_modifiers"
         trace["original_request_units"] = units
         trace["proposed_unit_routes"] = (
             proposed.model_dump() if hasattr(proposed, "model_dump") else None

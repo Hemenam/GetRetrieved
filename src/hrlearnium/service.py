@@ -384,6 +384,7 @@ class CourseService:
                                 proposed,
                                 response_language(request.question),
                                 translate=translate,
+                                original_question=request.question,
                             )
                         except (ValueError, ModelUnavailable) as error:
                             if isinstance(

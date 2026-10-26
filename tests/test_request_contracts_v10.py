@@ -630,6 +630,6 @@ def test_shipped_v10_gateway_full_http_path_has_no_offsets_in_llm_context(api_fa
         assert body["status"] == "answered" and body["answer_kind"] == "multi"
         assert [p["answer_kind"] for p in body["parts"]] == ["metadata", "content"]
         assert len(calls) == 4
-        assert body["evaluation"]["routing_protocol"] == "v10_indexed_units"
+        assert body["evaluation"]["routing_protocol"] == "v12_indexed_modifiers"
     finally:
         model.close()
